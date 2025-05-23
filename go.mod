@@ -1,12 +1,15 @@
-module aiup/go-gen
+module aiupstart.com/go-gen
 
-go 1.23.0
-
-toolchain go1.23.9
-
-require github.com/docker/docker v28.1.1+incompatible
+go 1.23.9
 
 require (
+	github.com/docker/docker v28.1.1+incompatible
+	github.com/joho/godotenv v1.5.1
+	github.com/sashabaranov/go-openai v1.40.0
+)
+
+require (
+	github.com/Microsoft/go-winio v0.4.14 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/go-connections v0.5.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
@@ -23,4 +26,5 @@ require (
 	go.opentelemetry.io/otel v1.36.0 // indirect
 	go.opentelemetry.io/otel/metric v1.36.0 // indirect
 	go.opentelemetry.io/otel/trace v1.36.0 // indirect
+	golang.org/x/sys v0.33.0 // indirect
 )
