@@ -13,21 +13,37 @@ import (
 	"encoding/json"
 )
 
+const promptTemplate = `You are an AI assistant. Your persona is: %s
+
+You have access to the following tools:
+%s
+
+When appropriate, call a tool by outputting JSON like:
+{"tool": "fetch_arxiv", "args": {"query": "..."}}.
+
+Otherwise, answer directly.
+
+User request: %s
+`
+
 type AssistantAgent struct {
     name         string
     llmClient    llm.LLMClient
-    promptTpl    string
+    persona    string
     toolRegistry *tools.ToolRegistry
 }
 
-func NewAssistantAgent(name string, llmClient llm.LLMClient, promptTpl string, registry *tools.ToolRegistry) *AssistantAgent {
+func NewAssistantAgent(name string, llmClient llm.LLMClient, persona string, registry *tools.ToolRegistry) *AssistantAgent {
     return &AssistantAgent{
         name:         name,
         llmClient:    llmClient,
-        promptTpl:    promptTpl,
         toolRegistry: registry,
+        persona:      persona,
+        // toolsPrompt:  registry.DescribeTools(),
     }
 }
+
+
 
 type ToolSuggestion struct {
     Tool string                 `json:"tool"`
@@ -39,9 +55,20 @@ func (a *AssistantAgent) Name() string { return a.name }
 func (a *AssistantAgent) Start(input <-chan model.Message, output chan<- model.Message) {
     go func() {
         for msg := range input {
-            prompt := fmt.Sprintf(a.promptTpl, msg.Content)
-			utils.Logger.Debug().Str("prompt", prompt).Msg("Prompt sent to LLM")
+            // Compose a prompt that includes both persona and available tools
+            // prompt := a.promptTpl + "\n" + a.toolsPrompt + "\nUser: " + msg.Content
+            prompt := fmt.Sprintf(
+                promptTemplate,
+                a.persona,
+                a.toolRegistry.DescribeTools(),
+                msg.Content,
+            )
+
+			utils.Logger.Debug().Str("prompt", prompt).Msg("Prompt going to LLM")
             llmResp, err := a.llmClient.Generate(prompt)
+            // prompt := fmt.Sprintf(a.promptTpl, msg.Content)
+
+
 			utils.Logger.Debug().Str("llm_response", llmResp).Msg("LLM response received")
             if err != nil {
                 output <- model.Message{Sender: a.name, Content: "[ERROR] " + err.Error()}
@@ -49,6 +76,7 @@ func (a *AssistantAgent) Start(input <-chan model.Message, output chan<- model.M
             }
 			fmt.Printf("[LLM Response from %s]: %s\n", a.name, llmResp)
 			utils.Logger.Debug().Str(("llm_response"), llmResp).Msg("About to parse response and check for tool calling")
+
             // Try parsing as a tool suggestion
             var suggestion ToolSuggestion
             if json.Unmarshal([]byte(llmResp), &suggestion) == nil && suggestion.Tool != "" {
@@ -74,4 +102,15 @@ func (a *AssistantAgent) Start(input <-chan model.Message, output chan<- model.M
             }
         }
     }()
+}
+
+// ParseToolCall tries to extract a tool call from LLM output.
+func ParseToolCall(llmResp string) (tools.ToolCall, bool) {
+    // This function should parse JSON, function call, or even natural-language cues.
+    // Example: look for a JSON block with "tool": "...", "args": {...}
+    var toolCall tools.ToolCall
+    if err := json.Unmarshal([]byte(llmResp), &toolCall); err == nil && toolCall.Name != "" {
+        return toolCall, true
+    }
+    return tools.ToolCall{}, false
 }

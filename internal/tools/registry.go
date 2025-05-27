@@ -1,9 +1,10 @@
 package tools
 
 import (
-    "context"
-    "fmt"
-    "sync"
+	"context"
+	"fmt"
+	"strings"
+	"sync"
 )
 
 type ToolRegistry struct {
@@ -38,6 +39,15 @@ func (r *ToolRegistry) List() []Tool {
         out = append(out, t)
     }
     return out
+}
+
+// Generates a string like: "Available tools: fetch_arxiv: search academic papers; milvus_vector: vector DB ops; ..."
+func (tr *ToolRegistry) DescribeTools() string {
+    descs := []string{}
+    for _, t := range tr.List() {
+        descs = append(descs, fmt.Sprintf("%s: %s", t.Name(), t.Description()))
+    }
+    return "Available tools:\n" + strings.Join(descs, "\n")
 }
 
 // Dynamic tool invocation by name (with trace support)

@@ -39,14 +39,12 @@ func main() {
 	}
 	registry.Register(&tools.DockerExecTool{})
 
+
 	prompt := `
-	You are an AI assistant that can call external tools by outputting ONLY a JSON object in this format:
+	You are a helpful AI assistant. You can answer coding questions, help with Python and Go code, or use special tools for advanced tasks.
 
-	{"tool": "fetch_arxiv", "args": {"query": "<search query>"}}
+	If the user asks you to find papers, call the tool for finding relevant papers. On tool use, DO NOT reply with natural language or explanation. Only output the JSON.
 
-	If the user asks you to find papers, call the tool. DO NOT reply with natural language or explanation. Only output the JSON.
-
-	User request: %s
 	`
 
 	// Generic assistant agent
