@@ -9,6 +9,7 @@ import (
 
 	"aiupstart.com/go-gen/internal/model"
 	"aiupstart.com/go-gen/internal/tools"
+	"aiupstart.com/go-gen/internal/utils"
 )
 type HITLAgent struct {
     name         string
@@ -57,10 +58,19 @@ func (h *HITLAgent) Start(input <-chan model.Message, output chan<- model.Messag
                     output <- model.Message{Sender: h.name, Content: fmt.Sprintf("%v", result.Output), MessageType: model.TypeToolResult, ToolResult: &result}
                 }
             } else {
-                fmt.Printf("\n[From %s]: %s\n", msg.Sender, msg.Content)
+                utils.Logger.Debug().
+                    Str("agent", h.name).
+                    Str("sender", msg.Sender).
+                    Str("content", msg.Content).
+                    Msg("Received message")
             }
         }
     }()
+}
+
+func (h *HITLAgent) BeginChat(manager *ChatManager, firstMessage model.Message)  {
+    manager.InputChan() <- firstMessage
+    utils.Logger.Debug().Str("agent", h.name).Msg("HITLAgent started chat session")
 }
 
 // Let user inject their own messages or tool calls

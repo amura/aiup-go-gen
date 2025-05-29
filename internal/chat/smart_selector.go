@@ -8,8 +8,8 @@ import (
 )
 
 // Switch to Writer if Researcher output includes "report", else to Researcher, else fallback to Planner
-func SmartSelector() StateSelector {
-	return StateSelectorFunc(func(lastAgentIdx int, agents []agent.Agent, lastMsg model.Message, history []model.Message, ctx map[string]interface{}) int {
+func SmartSelector() func(int, []agent.Agent, model.Message, []model.Message, interface{}) int {
+	return StateSelectorFunc(func(lastAgentIdx int, agents []agent.Agent, lastMsg model.Message, history []model.Message, ctx interface{}) int {
 		// Example: you can use context, meta, or message content
 		if strings.Contains(strings.ToLower(lastMsg.Content), "report") {
 			// Find writer

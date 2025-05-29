@@ -42,12 +42,6 @@ func NewAssistantAgent(name string, llmClient llm.LLMClient, persona string, reg
 }
 
 
-
-type ToolSuggestion struct {
-    Tool string                 `json:"tool"`
-    Args map[string]interface{} `json:"args"`
-}
-
 func (a *AssistantAgent) Name() string { return a.name }
 
 func (a *AssistantAgent) Start(input <-chan model.Message, output chan<- model.Message) {
@@ -69,7 +63,7 @@ func (a *AssistantAgent) Start(input <-chan model.Message, output chan<- model.M
 
 			utils.Logger.Debug().Str("llm_response", llmResp).Msg("LLM response received")
             if err != nil {
-                output <- model.Message{Sender: a.name, Content: "[ERROR] " + err.Error()}
+                output <- model.Message{Sender: a.name, Content: "[LLM ERROR] " + err.Error()}
                 continue
             }
 			fmt.Printf("[LLM Response from %s]: %s\n", a.name, llmResp)
@@ -79,14 +73,7 @@ func (a *AssistantAgent) Start(input <-chan model.Message, output chan<- model.M
             toolCall, toolDetected := tools.ParseToolCall(llmResp)
             if toolDetected && a.toolRegistry.HasTool(toolCall.Name) {
                 utils.Logger.Debug().Str("tool_call", fmt.Sprintf("%+v", toolCall)).Msg("Tool call created from LLM response")
-                // result := a.toolRegistry.CallTool(context.Background(), toolCall)
-                // if result.Error != nil {
-                //     utils.Logger.Error().Err(result.Error).Msg("Tool call failed")
-                //     output <- model.Message{Sender: a.name, Content: "[TOOL ERROR] " + result.Error.Error()}
-                // } else {
-                //     utils.Logger.Debug().Str("tool_result", fmt.Sprintf("%+v", result.Output)).Msg("Tool call succeeded")
-                //     output <- model.Message{Sender: a.name, Content: fmt.Sprintf("%v", result.Output)}
-                // }
+  
                   // Instead of running, delegate to HITL agent by sending tool call message
                   output <- model.Message{Sender: a.name, Content: llmResp, MessageType: model.TypeToolCall, ToolCall: &toolCall}
            

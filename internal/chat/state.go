@@ -13,12 +13,12 @@ type StateSelector interface {
 		agents []agent.Agent,
 		lastMsg model.Message,
 		history []model.Message,
-		ctx map[string]interface{},
+		ctx interface{},
 	) int
 }
 
 // StateSelectorFunc is an adapter to allow using ordinary functions as selectors.
-type StateSelectorFunc func(int, []agent.Agent, model.Message, []model.Message, map[string]interface{}) int
+type StateSelectorFunc func(int, []agent.Agent, model.Message, []model.Message, interface{}) int
 
 func (f StateSelectorFunc) NextAgent(
 	lastAgentIdx int,
