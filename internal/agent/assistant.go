@@ -2,7 +2,6 @@
 package agent
 
 import (
-	"context"
 	"fmt"
 
 	"aiupstart.com/go-gen/internal/llm"
@@ -10,7 +9,6 @@ import (
 	"aiupstart.com/go-gen/internal/tools"
 	"aiupstart.com/go-gen/internal/utils"
 
-	"encoding/json"
 )
 
 const promptTemplate = `You are an AI assistant. Your persona is: %s
@@ -78,39 +76,26 @@ func (a *AssistantAgent) Start(input <-chan model.Message, output chan<- model.M
 			utils.Logger.Debug().Str(("llm_response"), llmResp).Msg("About to parse response and check for tool calling")
 
             // Try parsing as a tool suggestion
-            var suggestion ToolSuggestion
-            if json.Unmarshal([]byte(llmResp), &suggestion) == nil && suggestion.Tool != "" {
-                toolCall := tools.ToolCall{
-                    Name:   suggestion.Tool,
-                    Args:   suggestion.Args,
-                    Caller: a.name,
-                    Trace:  []string{a.name},
-                }
+            toolCall, toolDetected := tools.ParseToolCall(llmResp)
+            if toolDetected && a.toolRegistry.HasTool(toolCall.Name) {
                 utils.Logger.Debug().Str("tool_call", fmt.Sprintf("%+v", toolCall)).Msg("Tool call created from LLM response")
-                result := a.toolRegistry.CallTool(context.Background(), toolCall)
-                if result.Error != nil {
-                    utils.Logger.Error().Err(result.Error).Msg("Tool call failed")
-                    output <- model.Message{Sender: a.name, Content: "[TOOL ERROR] " + result.Error.Error()}
-                } else {
-                    utils.Logger.Debug().Str("tool_result", fmt.Sprintf("%+v", result.Output)).Msg("Tool call succeeded")
-                    output <- model.Message{Sender: a.name, Content: fmt.Sprintf("%v", result.Output)}
-                }
+                // result := a.toolRegistry.CallTool(context.Background(), toolCall)
+                // if result.Error != nil {
+                //     utils.Logger.Error().Err(result.Error).Msg("Tool call failed")
+                //     output <- model.Message{Sender: a.name, Content: "[TOOL ERROR] " + result.Error.Error()}
+                // } else {
+                //     utils.Logger.Debug().Str("tool_result", fmt.Sprintf("%+v", result.Output)).Msg("Tool call succeeded")
+                //     output <- model.Message{Sender: a.name, Content: fmt.Sprintf("%v", result.Output)}
+                // }
+                  // Instead of running, delegate to HITL agent by sending tool call message
+                  output <- model.Message{Sender: a.name, Content: llmResp, MessageType: model.TypeToolCall, ToolCall: &toolCall}
+           
             } else {
                 utils.Logger.Debug().Msg("No tool call detected in LLM response, sending direct response")
                 // Otherwise, just output the LLM’s direct response
-                output <- model.Message{Sender: a.name, Content: llmResp}
+                output <- model.Message{Sender: a.name, Content: llmResp, MessageType: model.TypeChat}
             }
         }
     }()
 }
 
-// ParseToolCall tries to extract a tool call from LLM output.
-func ParseToolCall(llmResp string) (tools.ToolCall, bool) {
-    // This function should parse JSON, function call, or even natural-language cues.
-    // Example: look for a JSON block with "tool": "...", "args": {...}
-    var toolCall tools.ToolCall
-    if err := json.Unmarshal([]byte(llmResp), &toolCall); err == nil && toolCall.Name != "" {
-        return toolCall, true
-    }
-    return tools.ToolCall{}, false
-}

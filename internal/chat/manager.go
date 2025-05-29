@@ -38,7 +38,7 @@ func NewChatManager(agents []agent.Agent, prompts map[string]string, selector St
 // the message to the chosen agent, receives the agent's response, updates the history,
 // and sends the response to the output channel. This enables concurrent, coordinated
 // communication between the manager and multiple agents.
-func (cm *ChatManager) Start() {
+func (cm *ChatManager) Start(initial ...model.Message) {
 	utils.Logger.Debug().Msg(fmt.Sprintf("Starting ChatManager with agents: %d", len(cm.agents)))
 	// This code sets up concurrent communication between a manager and multiple agents, giving each agent its own dedicated input and output channels for safe, parallel message passing. This is a common Go pattern for orchestrating multiple worker goroutines.
 	agentInputs := make([]chan model.Message, len(cm.agents))
@@ -50,7 +50,14 @@ func (cm *ChatManager) Start() {
 	}
 
 	go func() {
+		// Inject initial messages if provided
+		if len(initial) > 0 {
+			for _, msg := range initial {
+				cm.input <- msg
+			}
+		}
 		cm.lastAgentIdx = 0 // Could be configured
+
 		for {
 			msg := <-cm.input
 			cm.history = append(cm.history, msg)

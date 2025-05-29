@@ -60,3 +60,10 @@ func (r *ToolRegistry) CallTool(ctx context.Context, call ToolCall) ToolResult {
     call.Trace = append(call.Trace, call.Name)
     return tool.Call(ctx, call)
 }
+
+func (r *ToolRegistry) HasTool(name string) bool {
+    r.mu.RLock()
+    defer r.mu.RUnlock()
+    _, ok := r.tools[name]
+    return ok
+}

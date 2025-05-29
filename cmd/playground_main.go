@@ -3,11 +3,14 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"aiupstart.com/go-gen/internal/agent"
 	"aiupstart.com/go-gen/internal/chat"
 	"aiupstart.com/go-gen/internal/llm"
+	"aiupstart.com/go-gen/internal/model"
 	"aiupstart.com/go-gen/internal/tools"
+
 	// "aiupstart.com/go-gen/internal/utils"
 	"github.com/joho/godotenv"
 )
@@ -39,33 +42,50 @@ func main() {
 	}
 	registry.Register(&tools.DockerExecTool{})
 
-
 	prompt := `
 	You are a helpful AI assistant. You can answer coding questions, help with Python and Go code, or use special tools for advanced tasks.
 
-	If the user asks you to find papers, call the tool for finding relevant papers. On tool use, DO NOT reply with natural language or explanation. Only output the JSON.
-
+	You have access to docker_exec too which can execute your code in a docker container to check correctness or run scripts.
 	`
 
 	// Generic assistant agent
 	assistant := agent.NewAssistantAgent("Assistant", llmClient, prompt, registry)
 
 	// User proxy agent (choose console or MQ)
-	userProxy := agent.NewUserProxyAgent("User")
+	hitlAgent := agent.NewHITLAgent("User", registry)
+	hitlAgent.ApproveTools = false // Enable tool approval if desired
 
-	agents := []agent.Agent{userProxy, assistant}
+	agents := []agent.Agent{hitlAgent, assistant}
+
+	// check if hitlAgent is enabled via if check append(agents, hitlAgent)...
 	selector := chat.RoundRobinSelector() // or advanced selector
 	manager := chat.NewChatManager(agents, nil, selector)
-	manager.Start()
 
-	// Channel from user input to chat
-	go userProxy.UserInputLoop(manager.InputChan())
+	// Autonomous flow: Terminate after N turns or on "exit"/"done"
+    maxTurns := 12
+    turns := 0
 
-	// Example: print everything that comes back to userProxy
-	for {
-		msg := manager.Receive()
-		fmt.Printf("[System]: %s: %s\n", msg.Sender, msg.Content)
-	}
+    first := model.Message{Sender: "User", Content: "Create a new angular web app for user login."}
+    manager.Start(first)
+
+    for {
+        msg := <-manager.OutputChan()
+        fmt.Printf("[%s]: %s\n", msg.Sender, msg.Content)
+
+        turns++
+        if turns >= maxTurns {
+            fmt.Println("Max turns reached. Exiting.")
+            break
+        }
+        // Or terminate if an agent outputs an exit/done message
+        lower := strings.ToLower(msg.Content)
+        if strings.Contains(lower, "exit") || strings.Contains(lower, "done") {
+            fmt.Println("Termination cue detected. Exiting.")
+            break
+        }
+        // Autonomous: feed response back to manager.input for next agent
+        manager.InputChan() <- msg
+    }
 	//   if cfg == nil || toolEnabled(cfg, "markdown_report") {
 	// 	  registry.Register(&tools.MarkdownReportTool{})
 	//   }
