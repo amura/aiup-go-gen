@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"aiupstart.com/go-gen/internal/agent"
-	"aiupstart.com/go-gen/internal/chat"
 	"aiupstart.com/go-gen/internal/llm"
 	"aiupstart.com/go-gen/internal/model"
 	"aiupstart.com/go-gen/internal/tools"
@@ -55,14 +54,29 @@ func main() {
 
 	agents := []agent.Agent{hitlAgent, assistant}
 
-	// check if hitlAgent is enabled via if check append(agents, hitlAgent)...
-	selector := chat.RoundRobinSelector() // or advanced selector
-	manager := agent.NewChatManager(agents, nil, selector)
+	var manager *agent.ChatManager
+    orchestrator := agent.NewOrchestratorAgent("Orchestrator", manager, agents, llmClient)
+    agentListWithOrch := append([]agent.Agent{orchestrator}, agents...)
+    manager = agent.NewChatManager(agentListWithOrch)
+    orchestrator.SetManager(manager) // set after to avoid nil ref
 
+
+	// // check if hitlAgent is enabled via if check append(agents, hitlAgent)...
+	// selector := chat.RoundRobinSelector() // or advanced selector
+
+	// orchestrator := agent.NewOrchestratorAgent("Orchestrator", agents, SimpleStrategy)
+	// topAgents := []agent.Agent{orchestrator}
+	
+	// manager := agent.NewChatManager(topAgents, chat.RoundRobinSelector())
+	// manager.Start()
+	
     first := model.Message{Sender: "User", Content: "Create a new angular web app for user login."}
     manager.Start()
 
-	go hitlAgent.BeginChat(manager, first)
+    go func() { manager.InputChan() <- first }()
+
+
+	// go hitlAgent.BeginChat(manager, first)
 
 	for msg := range manager.OutputChan() {
 		fmt.Printf("[%s]: %s\n", msg.Sender, msg.Content)
@@ -137,4 +151,18 @@ func toolEnabled(cfg *tools.ToolConfig, name string) bool {
 		}
 	}
 	return false
+}
+
+func SimpleStrategy(msg model.Message, agents []agent.Agent) int {
+    // Route to Assistant if normal chat, to HITL if tool call, etc.
+    if msg.MessageType == model.TypeToolCall {
+        for i, a := range agents {
+            if a.Name() == "HITL" { return i }
+        }
+    }
+    // Default to assistant
+    for i, a := range agents {
+        if a.Name() == "Assistant" { return i }
+    }
+    return 0 // fallback
 }
