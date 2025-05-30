@@ -9,6 +9,8 @@ const (
     TypeChat     MessageType = "chat"
     TypeToolCall MessageType = "tool_call"
     TypeToolResult MessageType = "tool_result"
+    TypeRoute      MessageType = "route"
+    TypeDirect     MessageType = "direct"
 )
 
 type Message struct {
@@ -17,4 +19,5 @@ type Message struct {
     MessageType MessageType
     ToolCall    *tools.ToolCall // if tool_call
     ToolResult  *tools.ToolResult // if tool_result
+    RouteTarget string // For routing messages to specific agents
 }
