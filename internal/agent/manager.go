@@ -1,9 +1,11 @@
 // internal/chat/manager.go
+// always starts flow with Orchestrator, then routes based on message type.
 package agent
 
 import (
 	"fmt"
 
+	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/model"
 	"aiupstart.com/go-gen/internal/utils"
 )
@@ -28,6 +30,7 @@ func NewChatManager(agentList []Agent) *ChatManager {
     agentInputs := make(map[string]chan model.Message)
     agentOutputs := make(map[string]chan model.Message)
     for _, a := range agentList {
+        utils.Logger.Debug().Str("agent","chatmanager").Msgf("Registering agent: %s", a.Name())
         agents[a.Name()] = a
         agentInputs[a.Name()] = make(chan model.Message, 2)
         agentOutputs[a.Name()] = make(chan model.Message, 2)
@@ -52,52 +55,68 @@ func NewChatManager(agentList []Agent) *ChatManager {
 // communication between the manager and multiple agents.
 func (cm *ChatManager) Start() {
 	utils.Logger.Debug().Msg(fmt.Sprintf("Starting ChatManager with agents: %d", len(cm.agents)))
-	// This code sets up concurrent communication between a manager and multiple agents, giving each agent its own dedicated input and output channels for safe, parallel message passing. This is a common Go pattern for orchestrating multiple worker goroutines.
-	// agentInputs := make([]chan model.Message, len(cm.agents))
-	// agentOutputs := make([]chan model.Message, len(cm.agents))
-	// for i := range cm.agents {
-	// 	agentInputs[i] = make(chan model.Message)
-	// 	agentOutputs[i] = make(chan model.Message)
-	// 	go cm.agents[i].Start(agentInputs[i], agentOutputs[i])
-	// }
 
-	go func() {
-		// cm.lastAgentIdx = 0 // Could be configured
-
+    go func() {
 		for {
 			msg := <-cm.input
+			utils.Logger.Debug().
+				Str("sender", msg.Sender).
+				Msgf("Manager received message: %s, now routing to [Orchestrator]", msg.Content)
+			metrics.AgentMessagesTotal.WithLabelValues("Manager").Inc()
 			cm.history = append(cm.history, msg)
+			
+			// Start by always sending to Orchestrator
+			cm.agentInputs["Orchestrator"] <- msg
+			resp := <-cm.agentOutputs["Orchestrator"]
+			utils.Logger.Debug().
+				Str("sender", resp.Sender).
+				Msgf("Manager received response: %s", resp.Content)
 
-			// orch := cm.agents["Orchestrator"]
-            cm.agentInputs["Orchestrator"] <- msg
-            resp := <-cm.agentOutputs["Orchestrator"]
-            // Orchestrator sends back a special message indicating which agent+task to route, or actual output
-            // We detect the type by checking MessageType or Content pattern
-			if resp.MessageType == model.TypeRoute { // Custom route type
-                agentName := resp.RouteTarget
-                task := resp.Content
-                if inChan, ok := cm.agentInputs[agentName]; ok {
-                    fmt.Printf("[Manager] Routing task to agent [%s]\n", agentName)
-                    inChan <- model.Message{Sender: "Orchestrator", Content: task}
-                    agentResp := <-cm.agentOutputs[agentName]
-                    cm.output <- agentResp
-                    cm.history = append(cm.history, agentResp)
-                } else {
-                    cm.output <- model.Message{Sender: "Manager", Content: "[ERROR] Unknown agent: " + agentName}
-                }
-            } else if resp.MessageType == model.TypeDirect { // Orchestrator has already called agent directly
-                cm.output <- resp // Just forward output
-            } else {
-                cm.output <- resp // Fallback/default
-            }
-
-
-			// nextIdx := cm.selector(cm.lastAgentIdx, cm.agents, msg, cm.history, cm.context)
-			// agentInputs[nextIdx] <- msg
-			// resp := <-agentOutputs[nextIdx]
-			// cm.history = append(cm.history, resp)
-			// cm.lastAgentIdx = nextIdx
-			// cm.output <- resp
+			// Loop: keep routing until output is final
+			for {
+				// --- Tool Call: Route to ToolRunner ---
+				if resp.MessageType == model.TypeToolCall && resp.ToolCall != nil {
+					toolAgent := ToolNameToAgent(resp.ToolCall.Name)
+					utils.Logger.Debug().
+						Str("tool", resp.ToolCall.Name).
+						Msgf("Routing tool call to agent %s", toolAgent)
+					if inChan, ok := cm.agentInputs[toolAgent]; ok {
+						inChan <- resp
+						resp = <-cm.agentOutputs[toolAgent]
+						continue // chain: check next response
+					} else {
+						utils.Logger.Error().
+							Str("tool", resp.ToolCall.Name).
+							Msgf("[ERROR] Unknown tool agent: %s", toolAgent)
+						cm.output <- model.Message{Sender: "Manager", Content: "[ERROR] Unknown tool agent: " + toolAgent}
+						break
+					}
+				}
+				// --- Route as instructed to agent (could be Assistant, etc) ---
+				if resp.MessageType == model.TypeRoute {
+					agentName := resp.RouteTarget
+					utils.Logger.Debug().
+						Str("task", resp.Content).
+						Msgf("Routing task to agent %s", agentName)
+					if inChan, ok := cm.agentInputs[agentName]; ok {
+						inChan <- resp
+						resp = <-cm.agentOutputs[agentName]
+						continue // chain: check next response
+					} else {
+						utils.Logger.Error().
+							Str("agent", agentName).
+							Msgf("[ERROR] Unknown agent: %s", agentName)
+						cm.output <- model.Message{Sender: "Manager", Content: "[ERROR] Unknown agent: " + agentName}
+						break
+					}
+				}
+				// --- Otherwise, just forward output ---
+				utils.Logger.Debug().
+					Str("sender", resp.Sender).
+					Msgf("Final output from agent: %s", resp.Content)
+				cm.output <- resp
+				break
+			}
 		}
 	}()
 }

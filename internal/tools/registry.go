@@ -61,6 +61,15 @@ func (r *ToolRegistry) CallTool(ctx context.Context, call ToolCall) ToolResult {
     return tool.Call(ctx, call)
 }
 
+// This is what you need to add:
+func (r *ToolRegistry) Call(ctx context.Context, call ToolCall) ToolResult {
+    tool, ok := r.tools[call.Name]
+    if !ok {
+        return ToolResult{Error: fmt.Errorf("unknown tool: %s", call.Name)}
+    }
+    return tool.Call(ctx, call)
+}
+
 func (r *ToolRegistry) HasTool(name string) bool {
     r.mu.RLock()
     defer r.mu.RUnlock()

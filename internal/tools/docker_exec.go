@@ -2,11 +2,14 @@
 package tools
 
 import (
-    "context"
-    "fmt"
-    "os/exec"
-    "strings"
+	"context"
+	"fmt"
+	"os/exec"
+	"strings"
+
+	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/utils"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type DockerExecTool struct{}
@@ -29,11 +32,21 @@ var langImageMap = map[string]string{
     "bash":      "ubuntu:22.04",
     "sh":        "alpine:latest",
     "dotnet":    "mcr.microsoft.com/dotnet/sdk:8.0",
-    "angular":   "node:20", // user must npm install @angular/cli in code block!
+    "angular-cli":   "node:20", // user must npm install @angular/cli in code block!
     "npm":       "node:20",
+    "angular": "node:20", // assuming Angular CLI is installed in the container
 }
 
 func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
+    fmt.Print("Executing docker_exec tool call: ", call.Caller, "\n")
+    metrics.ToolCallsTotal.WithLabelValues(t.Name(), call.Caller).Inc()
+	timer := prometheus.NewTimer(metrics.ToolLatencySeconds.WithLabelValues(t.Name(), call.Caller))
+	defer timer.ObserveDuration()
+
+    utils.Logger.Debug().Str("tool", t.Name()).
+        Str("caller", call.Caller).
+        Msgf("Received call with args: %v", call.Args)
+
     langRaw, ok := call.Args["language"]
     if !ok {
         return ToolResult{Error: fmt.Errorf("missing argument: language")}

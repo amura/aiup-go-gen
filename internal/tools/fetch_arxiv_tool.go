@@ -1,14 +1,17 @@
 package tools
 
 import (
-    "context"
-    "fmt"
+	"context"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"aiupstart.com/go-gen/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type FetchArxivTool struct{}
@@ -32,6 +35,10 @@ func (t *FetchArxivTool) Parameters() map[string]string {
     return map[string]string{"query": "string"}
 }
 func (t *FetchArxivTool) Call(ctx context.Context, call ToolCall) ToolResult {
+	metrics.ToolCallsTotal.WithLabelValues(t.Name(), call.Caller).Inc()
+	timer := prometheus.NewTimer(metrics.ToolLatencySeconds.WithLabelValues(t.Name(), call.Caller))
+	defer timer.ObserveDuration()
+	
     query, ok := call.Args["query"].(string)
     if !ok {
         return ToolResult{Error: fmt.Errorf("missing argument: query")}
