@@ -1,26 +1,37 @@
 // internal/agent/orchestrator.go
+// Orchestrator: decides which agent next.
 package agent
+
 
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"aiupstart.com/go-gen/internal/llm"
+	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/model"
 	"aiupstart.com/go-gen/internal/utils"
 )
 
 const orchestrationPrompt = `
-You are an orchestrator agent. Your job is to decide which agent from the following should handle the next user task:
+You are an orchestration agent for an AI multi-agent system.
+Your role is to read the user’s request and decide **which agent** should handle it next.
 
-Available agents:
+Given a user request, plan the required subtasks, and for each:
+- If code must be generated, assign to the "Assistant" agent.
+- If the next action is to execute a tool, send to the ToolRunnerAgent.
+- If the code fails verification, send the error and original task back to "Assistant" for correction and retry.
+- Repeat until the code runs successfully or user stops.
+
+Reply ONLY with a JSON object in the format:
+- To assign: {"agent": "<agent_name>", "subtask": "<task or code>"}
+- To verify: {"tool": "docker_exec", "args": { "language": "...", "code": "...", ... }}
+
+Agents:
 %s
 
-Given the following message:
+User's request:
 "%s"
-
-Respond in JSON as: {"agent": "<agent_name>", "subtask": "<task or subtask to pass to agent>"}
 `
 
 // MessageType additions for routing/direct
@@ -29,7 +40,13 @@ const (
     TypeDirect model.MessageType = "direct"
 )
 
-type LLMOrchResponse struct {
+
+
+type LLMOrchToolResponse struct {
+    Tool string                 `json:"tool"`
+    Args map[string]interface{} `json:"args"`
+}
+type LLMOrchAgentResponse struct {
     Agent   string `json:"agent"`
     Subtask string `json:"subtask"`
 }
@@ -57,7 +74,11 @@ func (o *OrchestratorAgent) SetManager(manager *ChatManager) {
 func (o *OrchestratorAgent) Start(input <-chan model.Message, output chan<- model.Message) {
     go func() {
         for msg := range input {
-            utils.Logger.Debug().Str("[Orchestrator]",  fmt.Sprintf("Received: %s\n", msg.Content))
+			metrics.AgentMessagesTotal.WithLabelValues(o.Name()).Inc()
+            utils.Logger.Debug().
+                Str("agent", o.name).
+                Str("event", "received_message").
+                Msgf("Received: %s", msg.Content)
             agentListStr := ""
             for _, a := range o.agentList {
                 agentListStr += fmt.Sprintf("- %s\n", a.Name())
@@ -74,8 +95,47 @@ func (o *OrchestratorAgent) Start(input <-chan model.Message, output chan<- mode
                 }
                 continue
             }
-            var routeResp LLMOrchResponse
-            if err := json.Unmarshal([]byte(llmResp), &routeResp); err != nil {
+
+            //    // -- Handle OpenAI ToolCalls (preferred) --
+            //    if len(llmResp.ToolCalls) > 0 {
+            //     for _, toolCall := range llmResp.ToolCalls {
+            //         toolAgent := ToolNameToAgent(toolCall.Name)
+            //         output <- model.Message{
+            //             Sender:      o.name,
+            //             MessageType: model.TypeRoute,
+            //             RouteTarget: toolAgent,
+            //             ToolCall: &tools.ToolCall{
+            //                 Name:   toolCall.Name,
+            //                 Args:   toolCall.Args,
+            //                 Caller: o.name,
+            //             },
+            //             Content: fmt.Sprintf("Tool call for %s", toolCall.Name),
+            //         }
+            //     }
+            //     continue
+            // }
+			//  // Try to parse as tool call
+			//  var toolResp LLMOrchToolResponse
+			//  if err := json.Unmarshal([]byte(llmResp.Content), &toolResp); err == nil && toolResp.Tool != "" {
+			// 	 fmt.Printf("[Orchestrator] Routing tool call to: %s\n", toolResp.Tool)
+			// 	 // Route to the agent/tool registered for that tool
+			// 	 toolAgent := ToolNameToAgent(toolResp.Tool) // implement this lookup as needed
+			// 	 output <- model.Message{
+			// 		 Sender:      o.name,
+			// 		 MessageType: model.TypeRoute,
+			// 		 RouteTarget: toolAgent,
+			// 		 ToolCall: &tools.ToolCall{
+			// 			 Name: toolResp.Tool,
+			// 			 Args: toolResp.Args,
+			// 			 Caller: o.name,
+			// 		 },
+			// 		 Content: fmt.Sprintf("Tool call for %s", toolResp.Tool),
+			// 	 }
+			// 	 continue
+			//  }
+
+            var routeResp LLMOrchAgentResponse
+            if err := json.Unmarshal([]byte(llmResp.Content), &routeResp); err != nil {
                 // fallback to assistant
                 routeResp.Agent = "Assistant"
                 routeResp.Subtask = msg.Content
@@ -91,10 +151,15 @@ func (o *OrchestratorAgent) Start(input <-chan model.Message, output chan<- mode
     }()
 }
 
-// Simple heuristics for routing
-func containsTool(s string) bool {
-	return strings.Contains(s, "tool") || strings.Contains(s, "fetch_arxiv")
-}
-func containsCode(s string) bool {
-	return strings.Contains(s, "code") || strings.Contains(s, "python")
+
+func ToolNameToAgent(tool string) string {
+    switch tool {
+    case "docker_exec":
+        return "ToolRunner" // Change to your docker agent name
+    case "stripe_mcp":
+        return "HITL" // Or the agent handling Stripe MCP
+    // Add more as needed
+    default:
+        return "Assistant"
+    }
 }

@@ -1,0 +1,9 @@
+tools:
+  - name: fetch_arxiv
+    enabled: true
+  - name: markdown_report
+    enabled: false
+  - name: composite_example
+    enabled: false
+  - name: docker_exec
+    enabled: true

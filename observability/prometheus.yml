@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: 'go-agent-app'
+    static_configs:
+      - targets: ['host.docker.internal:2112']  # If running app on host and Prometheus in Docker (Mac/Win)
+      # OR use 'localhost:2112' if running Prometheus and app on same machine/native
+      # - targets: ['localhost:2112']

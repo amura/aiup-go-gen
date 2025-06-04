@@ -1,0 +1,19 @@
+sequenceDiagram
+    participant User as User
+    participant Manager as Manager
+    participant Orchestrator as OrchestratorAgent
+    participant Assistant as AssistantAgent
+    participant ToolRunner as ToolRunnerAgent
+    participant DockerTool as DockerExecTool
+
+    User->>Manager: (Message) "Create a new Angular app with login"
+    Manager->>Orchestrator: (model.Message)
+    Orchestrator->>Assistant: (Route) model.Message
+    Assistant->>LLM: Compose prompt and call LLM
+    LLM-->>Assistant: (LLMResponse) (may be ToolCall for "docker_exec")
+    Assistant->>Manager: (model.Message) TypeToolCall, ToolCall: docker_exec
+    Manager->>ToolRunner: (model.Message) TypeToolCall, ToolCall: docker_exec
+    ToolRunner->>DockerTool: registry.Call(ctx, ToolCall)
+    DockerTool-->>ToolRunner: ToolResult (output or error)
+    ToolRunner->>Manager: (model.Message) TypeToolResult, Content: output
+    Manager->>User: (output/result to user)

@@ -3,17 +3,23 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"aiupstart.com/go-gen/internal/agent"
+	"aiupstart.com/go-gen/internal/config"
 	"aiupstart.com/go-gen/internal/llm"
+	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/model"
 	"aiupstart.com/go-gen/internal/tools"
+	"aiupstart.com/go-gen/internal/utils"
 
 	// "aiupstart.com/go-gen/internal/utils"
 	"github.com/joho/godotenv"
+	"github.com/sashabaranov/go-openai"
 )
 
 func main() {
+	utils.Logger.Debug().Str("module", "main").Msg("Starting AIUpStart Playground")
 
 	_ = godotenv.Load() // Loads .env file if present
 
@@ -23,36 +29,83 @@ func main() {
 		return
 	}
 
-	// OpenAI Example
-	llmClient := llm.NewOpenAIClient(apiKey, "gpt-4o")
+	metrics.StartMetricsServer(":2112")
 
+	
 	// Logger to file as well as stdout
 	// f, _ := os.OpenFile("run.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	// utils.Logger.SetOutput(f)
 
 	// Tool config (optional)
-	cfg, _ := tools.LoadToolConfig("config/tools.yaml")
+	cfg, _ := tools.LoadToolConfig("./tools.yaml")
+
+	pwd, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	mcpCfgPath := filepath.Join(filepath.Dir(pwd), "mcp_tools.yaml")
+	utils.Logger.Debug().Str("module", "main").Msgf("Starting AIUpStart Playground with file %s", mcpCfgPath)
+
+	mcp_cfg, err := config.LoadConfig(mcpCfgPath)
+	if err != nil { panic(err) }
 
 	registry := tools.NewToolRegistry()
+
+	for _, mcp := range mcp_cfg.McpTools {
+		tool := &tools.GenericMcpTool{
+			NameStr:        mcp.Name,
+			Endpoint:       mcp.Endpoint,
+			DescriptionStr: mcp.Description,
+		}
+		registry.Register(tool)
+	}
+
+	// OpenAI Example
+	// 
+	// llmClient := llm.NewOpenAIClient(apiKey, "gpt-4o", mcp_cfg)
+
+	oaClient := openai.NewClient(apiKey)
+	openAITools := llm.BuildOpenAIToolsFromConfig(mcp_cfg)
+	  // --- 4. Wrap OpenAI client in your LLM interface ---
+	  llmClient := llm.NewOpenAILLMClient(oaClient, openAITools)
+
+	//   // --- 5. Build ToolRegistry for runtime tool calls ---
+	//   registry := tools.NewToolRegistry()
+	//   for _, mcp := range cfg.McpTools {
+	// 	  for _, op := range mcp.Operations {
+	// 		  registry.Register(&tools.GenericMcpTool{
+	// 			  NameStr:        op.Name,
+	// 			  Endpoint:       mcp.Endpoint,
+	// 			  DescriptionStr: op.Description,
+	// 			  // Optionally: add validation fields for runtime here
+	// 		  })
+	// 	  }
+	//   }
+
+
+
 	// Register tools only if enabled
 	if cfg == nil || toolEnabled(cfg, "fetch_arxiv") {
 		registry.Register(&tools.FetchArxivTool{})
 	}
 	registry.Register(&tools.DockerExecTool{})
 
-	prompt := `
-	You are a helpful AI assistant. You can answer coding questions, help with Python and Go code, or use special tools for advanced tasks.
-
-	`
+	prompt := `You are precise, helpful, and always prefer running and testing code over guessing. 
+		If the user requests a coding task, you generate high-quality, working code, and always execute it for validation.`
+	
 
 	// Generic assistant agent
 	assistant := agent.NewAssistantAgent("Assistant", llmClient, prompt, registry)
 
 	// User proxy agent (choose console or MQ)
-	hitlAgent := agent.NewHITLAgent("User", registry)
-	hitlAgent.ApproveTools = false // Enable tool approval if desired
+	// hitlAgent := agent.NewHITLAgent("User", registry)
+	// hitlAgent.ApproveTools = false // Enable tool approval if desired
+	toolRunner := agent.NewToolRunnerAgent("ToolRunner", registry)
 
-	agents := []agent.Agent{hitlAgent, assistant}
+	agents := []agent.Agent{ assistant, toolRunner}
+
+
+	// agents := []agent.Agent{hitlAgent, assistant}
 
 	var manager *agent.ChatManager
     orchestrator := agent.NewOrchestratorAgent("Orchestrator", manager, agents, llmClient)
@@ -70,7 +123,7 @@ func main() {
 	// manager := agent.NewChatManager(topAgents, chat.RoundRobinSelector())
 	// manager.Start()
 	
-    first := model.Message{Sender: "User", Content: "Create a new angular web app for user login."}
+    first := model.Message{Sender: "User", Content: "Create a new angular web app which has a main user login page."}
     manager.Start()
 
     go func() { manager.InputChan() <- first }()
@@ -79,7 +132,7 @@ func main() {
 	// go hitlAgent.BeginChat(manager, first)
 
 	for msg := range manager.OutputChan() {
-		fmt.Printf("[%s]: %s\n", msg.Sender, msg.Content)
+		fmt.Printf("*** [%s]: %s ***\n", msg.Sender, msg.Content)
 		// add termination condition to avoid endless loop
 	}
 
@@ -165,4 +218,21 @@ func SimpleStrategy(msg model.Message, agents []agent.Agent) int {
         if a.Name() == "Assistant" { return i }
     }
     return 0 // fallback
+// }
+
+// func BuildMcpPrompt(cfg *config.Config) string {
+//     s := "You have access to these MCP tools:\n"
+//     for _, t := range cfg.McpTools {
+//         s += fmt.Sprintf("\n%s: %s\n", t.Name, t.Description)
+//         s += "Supported operations:\n"
+//         for _, op := range t.Operations {
+//             s += fmt.Sprintf("- %s (%s %s): %s\n  Example: { \"tool\": \"%s\", \"args\": { \"path\": \"%s\", \"method\": \"%s\", \"body\": %v } }\n",
+//                 op.Name, op.Method, op.Path, op.Description, t.Name, op.Path, op.Method, op.ExampleArgs)
+//         }
+//     }
+//     s += "\nTo call a tool, always use this format:\n"
+//     s += "{ \"tool\": \"tool_name\", \"args\": { \"path\": \"...\", \"method\": \"...\", \"body\": {...} } }\n"
+//     s += "Do not use external APIs directly—always use these MCP tools.\n"
+//     return s
+// }
 }

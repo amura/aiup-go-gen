@@ -36,7 +36,7 @@ func (p *Planner) Start(input <-chan model.Message, output chan<- model.Message)
             if err != nil {
                 reply = fmt.Sprintf("[Planner error]: %v", err)
             } else {
-                reply = llmResponse
+                reply = llmResponse.Content
             }
 
             // Send the plan (or error) out

@@ -33,7 +33,7 @@ func (p *Researcher) Start(input <-chan model.Message, output chan<- model.Messa
             if err != nil {
                 reply = fmt.Sprintf("[Planner error]: %v", err)
             } else {
-                reply = llmResponse
+                reply = llmResponse.Content
             }
 
             // Send the plan (or error) out

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/model"
 	"aiupstart.com/go-gen/internal/tools"
 	"aiupstart.com/go-gen/internal/utils"
@@ -27,6 +28,7 @@ func (h *HITLAgent) Name() string { return h.name }
 func (h *HITLAgent) Start(input <-chan model.Message, output chan<- model.Message) {
     go func() {
         for msg := range input {
+            metrics.AgentMessagesTotal.WithLabelValues(h.Name()).Inc()
             if msg.MessageType == model.TypeToolCall && msg.ToolCall != nil {
                 if h.ApproveTools {
                     fmt.Printf("\n[Assistant suggests tool: %s] Args: %v\n", msg.ToolCall.Name, msg.ToolCall.Args)

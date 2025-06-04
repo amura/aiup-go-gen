@@ -3,11 +3,12 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 )
 
 type ToolCall struct {
-    Name   string
-    Args   map[string]interface{}
+    Name   string `json:"tool"`
+    Args   map[string]interface{} `json:"args"` // Arguments for the tool, e.g. {"query": "search term"}
     Caller string
     Trace  []string // For tracking call stack or chains
 }
@@ -28,8 +29,9 @@ type Tool interface {
 func ParseToolCall(llmResp string) (ToolCall, bool) {
     // This function should parse JSON, function call, or even natural-language cues.
     // Example: look for a JSON block with "tool": "...", "args": {...}
+    jsonBlock := ExtractFirstJsonBlock(llmResp)
     var toolCall ToolCall
-    if err := json.Unmarshal([]byte(llmResp), &toolCall); err == nil && toolCall.Name != "" {
+    if err := json.Unmarshal([]byte(jsonBlock), &toolCall); err == nil && toolCall.Name != "" {
         return toolCall, true
     }
 
@@ -47,3 +49,21 @@ func ParseToolCall(llmResp string) (ToolCall, bool) {
 
     return ToolCall{}, false
 }
+
+// Returns first JSON code block if present, else empty string
+func ExtractFirstJsonBlock(s string) string {
+    // Regex for ```json ... ```
+    re := regexp.MustCompile("(?s)```json\\s*(\\{.*?\\})\\s*```")
+    matches := re.FindStringSubmatch(s)
+    if len(matches) >= 2 {
+        return matches[1]
+    }
+    // Fallback: try to find any {...} JSON
+    re2 := regexp.MustCompile("(?s)(\\{\\s*\"tool\"\\s*:\\s*\"[^\"]+\".*\\})")
+    matches2 := re2.FindStringSubmatch(s)
+    if len(matches2) >= 2 {
+        return matches2[1]
+    }
+    return ""
+}
+
