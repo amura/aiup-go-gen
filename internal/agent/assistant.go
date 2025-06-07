@@ -4,6 +4,7 @@ package agent
 import (
 	"fmt"
 	"regexp"
+	"strings"
 
 	"aiupstart.com/go-gen/internal/llm"
 	"aiupstart.com/go-gen/internal/metrics"
@@ -32,7 +33,7 @@ When you need to use a function/tool, reply ONLY with a JSON code block (no narr
 {
   "tool": "docker_exec",
   "args": {
-    "language": "<language name, e.g. python, bash, node, dotnet, angular-cli>",
+    "language": "<language name, e.g. python, bash, node, dotnet, angular>",
     "code": "<code to execute as a string>",
     "requirements": "<optional: dependencies or package list>",
     "env": { "<ENV_VAR>": "value" },
@@ -55,6 +56,66 @@ Example:
 Never output code for execution/testing directly—**always** use the docker_exec tool and follow the output json above.
 
 Otherwise, answer directly.
+
+User request: %s
+`
+
+const assistantPromptTemplate = `
+You are an expert AI coding assistant. Your persona: %s
+
+You must ALWAYS output code in RING-FENCED code blocks using triple backticks (T_B_T), specifying the language.
+You start with the language name, followed on the next line by filename, then on the next line and onwards the full code block.
+When producing multi-file outputs, output each file as a separate code block with the filename as a comment at the top.
+
+For example:
+T_B_T python\n# filename: main.py\nprint("hello world")\nT_B_T
+
+...
+T_B_T bash
+# filename: start.sh
+    echo "Start"
+T_B_T
+
+Always include language, filename and content blocks with T_B_T
+
+---------------------------------------------
+
+You have access to the following tools:
+%s
+
+---------------------------------------------
+
+When the user requests code generation or bug fixing, reply ONLY with such ring-fenced code blocks.
+
+If you attempt code execution, use the docker_exec tool as a JSON tool call, and provide all code to execute in code blocks as above.
+
+If the previous execution failed, analyze the error shown, fix the code and retry.
+
+When you need to use a function/tool, reply ONLY with a JSON code block (no narrative), using the JSON format:
+{
+  "tool": "docker_exec",
+  "args": {
+    "language": "<language name, e.g. python, bash, node, dotnet, angular>",
+    "code": "<code blocks to execute as a string, ring-fenced with triple backticks>",
+    "requirements": "<optional: dependencies or package list>",
+    "env": { "<ENV_VAR>": "value" },
+    "init": "<optional: The name of the initialization script or commands to run before executing code, such as npm i, pip install dotnet packages, etc.>",
+    "launch": "<optional: path to a shell script to execute when launching the main code, e.g. 'start.sh'>"
+  }
+}
+
+Example:
+{
+  "tool": "docker_exec",
+  "args": {
+    "language": "python",
+    "code": "....print('Hello world!')..."  // or multiple code blocks ring fenced with triple backticks,
+    "init": "pip install requests",
+    "launch": "start.sh",
+  }
+}
+
+------------------------------------
 
 User request: %s
 `
@@ -85,7 +146,7 @@ func (a *AssistantAgent) Start(input <-chan model.Message, output chan<- model.M
 			// Compose a prompt that includes both persona and available tools
 			// prompt := a.promptTpl + "\n" + a.toolsPrompt + "\nUser: " + msg.Content
 			prompt := fmt.Sprintf(
-				promptTemplate,
+				strings.ReplaceAll(assistantPromptTemplate, "T_B_T", "```"),
 				a.persona,
 				a.toolRegistry.DescribeTools(),
 				msg.Content,

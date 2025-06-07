@@ -1,7 +1,11 @@
 // internal/model/message.go
 package model
 
-import "aiupstart.com/go-gen/internal/tools"
+import ( 
+    "aiupstart.com/go-gen/internal/tools"
+    openai "github.com/sashabaranov/go-openai"
+)
+
 
 type MessageType string
 
@@ -20,4 +24,9 @@ type Message struct {
     ToolCall    *tools.ToolCall // if tool_call
     ToolResult  *tools.ToolResult // if tool_result
     RouteTarget string // For routing messages to specific agents
+    IsError bool // Indicates if this message is an error
+    Error error
+    OriginAgent    string // Who initiated this request
+    OriginContent  string // What was the original subtask/request
+    Tokens *openai.Usage // For LLM responses, if applicable
 }

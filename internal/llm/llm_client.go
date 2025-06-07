@@ -1,5 +1,7 @@
 package llm
 
+import openai "github.com/sashabaranov/go-openai"
+
 
 type LLMToolCall struct {
     Name string
@@ -9,6 +11,7 @@ type LLMToolCall struct {
 type LLMResponse struct {
     Content   string
     ToolCalls []LLMToolCall
+    Tokens    *openai.Usage 
 }
 
 // LLMClient defines the interface for interacting with different LLM providers.

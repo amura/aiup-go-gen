@@ -8,6 +8,7 @@ import (
 	"aiupstart.com/go-gen/internal/config"
 	"aiupstart.com/go-gen/internal/utils"
 	openai "github.com/sashabaranov/go-openai"
+    "aiupstart.com/go-gen/internal/metrics"
 )
 
 type OpenAIClient struct {
@@ -87,6 +88,13 @@ func (c *OpenAILLMClient) Generate(prompt string) (LLMResponse, error) {
 		utils.Logger.Error().Err(err).Str("module", "llm").Msg("Failed to generate response from OpenAI")
 		return LLMResponse{}, fmt.Errorf("OpenAI API error: %w", err)
 	}
+    // After: resp, err := c.client.CreateChatCompletion(...)
+    metrics.OpenAITokensTotal.WithLabelValues("prompt").Add(float64(resp.Usage.PromptTokens))
+    metrics.OpenAITokensTotal.WithLabelValues("completion").Add(float64(resp.Usage.CompletionTokens))
+    metrics.OpenAITokensTotal.WithLabelValues("total").Add(float64(resp.Usage.TotalTokens))
+    utils.Logger.Debug().Str("module", "llm").Msgf("Token usage: prompt=%d, completion=%d, total=%d",
+        resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
+
 	if len(resp.Choices) == 0 {
 		utils.Logger.Error().Str("module", "llm").Msg("No choices returned from OpenAI API")
 		return LLMResponse{}, fmt.Errorf("no choices returned from OpenAI API")
@@ -95,6 +103,7 @@ func (c *OpenAILLMClient) Generate(prompt string) (LLMResponse, error) {
 	// Prepare response
     llmResp := LLMResponse{
         Content: resp.Choices[0].Message.Content, // for narrative/fallback
+        Tokens: &resp.Usage,
     }
 
     // Extract and parse tool calls if any

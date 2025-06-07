@@ -2,7 +2,7 @@ mcp_tools:
   - name: stripe_mcp
     endpoint: http://localhost:8080
     description: >
-      Use this tool to interact with the Stripe MCP API (customer, charge, payment intent, etc.).
+      Use this tool to interact with the Stripe MCP API (customer, charge, payment intent, etc.) only when payment related features are required and stripe is mentioned as the platform.
     operations:
       - name: create_customer
         path: /v1/customers
@@ -29,8 +29,8 @@ mcp_tools:
   - name: docker_exec
     operations:
       - name: docker_exec
-        description: Execute commands in a running Docker container
-        example_args: { "code_blocks": "```bash\n #filename test.sh ```", "init": "init.sh", "launch.sh": "launch.sh" }
+        description: Execute and validate code blocks by executing them in a docker container
+        example_args: { "code_blocks": "```bash\n #filename test.sh ```", "init": "init.sh", "launch.sh": "launch.sh", "docker_file": "FROM node\n..." }
         required: []
   # - name: github_mcp
   #   endpoint: http://localhost:8090
