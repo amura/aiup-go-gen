@@ -25,6 +25,12 @@ type DockerExecTool struct{
 	mu            sync.Mutex // for concurrency safety
 }
 
+type CodeBlock struct {
+	Language string
+	FileName string
+	Content  string
+}
+
 const DefaultDockerImage = "node:20"
 
 func NewDockerExecTool(prefix string, image string) *DockerExecTool {
@@ -89,7 +95,7 @@ func (t *DockerExecTool) ensureContainer(ctx context.Context, lang string) error
 }
 
 // Copy files to container (using docker cp)
-func (t *DockerExecTool) copyFilesToContainer(ctx context.Context, files []struct{ Language, FileName, Content string }) error {
+func (t *DockerExecTool) copyFilesToContainer(ctx context.Context, files []CodeBlock) error {
 	for _, f := range files {
 		dest := filepath.Join(t.workspace, f.FileName)
 		if err := os.WriteFile(dest, []byte(f.Content), 0644); err != nil {
@@ -106,9 +112,39 @@ func (t *DockerExecTool) execInContainer(ctx context.Context, command string) (s
 	return string(output), err
 }
 
+// ExtractCodeBlocks parses an array of strings in code_blocks format
+func ExtractCodeBlocks(blocks []string) []CodeBlock {
+	var out []CodeBlock
+	re := utils.CodeBlockRegex() // see below, or use your preferred regex
+	for _, block := range blocks {
+		match := re.FindStringSubmatch(block)
+		if len(match) >= 4 {
+			lang := strings.TrimSpace(match[1])
+			filename := ""
+			content := match[3]
+			lines := strings.SplitN(match[2], "\n", 2)
+			if len(lines) > 0 && strings.HasPrefix(lines[0], "# filename:") {
+				filename = strings.TrimSpace(strings.TrimPrefix(lines[0], "# filename:"))
+				if len(lines) > 1 {
+					content = lines[1]
+				}
+			}
+			if filename == "" {
+				filename = "main.txt"
+			}
+			out = append(out, CodeBlock{
+				Language: lang,
+				FileName: filename,
+				Content:  content,
+			})
+		}
+	}
+	return out
+}
+
 func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
-    fmt.Print("Executing docker_exec tool call: ", call.Caller, "\n")
-    metrics.ToolCallsTotal.WithLabelValues(t.Name(), call.Caller).Inc()
+	utils.Logger.Debug().Str("tool", t.Name()).Msgf("Executing docker_exec tool call: %v", call.Caller)
+	metrics.ToolCallsTotal.WithLabelValues(t.Name(), call.Caller).Inc()
 	timer := prometheus.NewTimer(metrics.ToolLatencySeconds.WithLabelValues(t.Name(), call.Caller))
 	defer timer.ObserveDuration()
 	langRaw, _ := call.Args["language"]
@@ -120,8 +156,17 @@ func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
 	}
 
 	// 1. Extract all code blocks and write to workspace
-	code, _ := call.Args["code"].(string)
-	blocks := utils.ExtractCodeBlocks(code)
+	rawBlocks, ok := call.Args["code_blocks"].([]interface{})
+	if !ok || len(rawBlocks) == 0 {
+		return ToolResult{Error: fmt.Errorf("missing or invalid code_blocks argument")}
+	}
+	var codeBlockStrs []string
+	for _, b := range rawBlocks {
+		if s, ok := b.(string); ok {
+			codeBlockStrs = append(codeBlockStrs, s)
+		}
+	}
+	blocks := ExtractCodeBlocks(codeBlockStrs)
 	if err := t.copyFilesToContainer(ctx, blocks); err != nil {
 		return ToolResult{Error: err}
 	}
@@ -133,8 +178,7 @@ func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
 		if err != nil {
 			return ToolResult{Output: initOut, Error: fmt.Errorf("init failed: %w", err)}
 		}
-        utils.Logger.Debug().Str("tool", t.Name()).
-            Msgf("Init command output: %s", initOut)
+		utils.Logger.Debug().Str("tool", t.Name()).Msgf("Init command output: %s", initOut)
 	}
 
 	// 3. Run launch or constructed main command
@@ -143,25 +187,22 @@ func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
 	var err error
 	if strings.TrimSpace(launchCmd) != "" {
 		output, err = t.execInContainer(ctx, launchCmd)
-	} else {
-		// For demo: just run the first file if launch not specified
-		if len(blocks) > 0 {
-			mainfile := blocks[0].FileName
-			run := ""
-			switch lang {
-			case "python":
-				run = fmt.Sprintf("python %s", mainfile)
-			case "bash", "sh":
-				run = fmt.Sprintf("sh %s", mainfile)
-			case "dotnet":
-				run = fmt.Sprintf("dotnet run --project %s", mainfile)
-			case "npm", "angular":
-				run = fmt.Sprintf("npm start")
-			default:
-				run = fmt.Sprintf("sh %s", mainfile)
-			}
-			output, err = t.execInContainer(ctx, run)
+	} else if len(blocks) > 0 {
+		mainfile := blocks[0].FileName
+		run := ""
+		switch lang {
+		case "python":
+			run = fmt.Sprintf("python %s", mainfile)
+		case "bash", "sh":
+			run = fmt.Sprintf("sh %s", mainfile)
+		case "dotnet":
+			run = fmt.Sprintf("dotnet run --project %s", mainfile)
+		case "npm", "angular":
+			run = fmt.Sprintf("npm start")
+		default:
+			run = fmt.Sprintf("sh %s", mainfile)
 		}
+		output, err = t.execInContainer(ctx, run)
 	}
 
 	return ToolResult{
@@ -169,6 +210,70 @@ func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
 		Error:  err,
 	}
 }
+
+// func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
+//     fmt.Print("Executing docker_exec tool call: ", call.Caller, "\n")
+//     metrics.ToolCallsTotal.WithLabelValues(t.Name(), call.Caller).Inc()
+// 	timer := prometheus.NewTimer(metrics.ToolLatencySeconds.WithLabelValues(t.Name(), call.Caller))
+// 	defer timer.ObserveDuration()
+// 	langRaw, _ := call.Args["language"]
+// 	lang := strings.ToLower(fmt.Sprintf("%v", langRaw))
+
+// 	if err := t.ensureContainer(ctx, lang); err != nil {
+// 		utils.Logger.Error().Msgf("Failed to ensure container: %v", err)
+// 		return ToolResult{Error: err}
+// 	}
+
+// 	// 1. Extract all code blocks and write to workspace
+// 	code, _ := call.Args["code"].(string)
+// 	blocks := utils.ExtractCodeBlocks(code)
+// 	if err := t.copyFilesToContainer(ctx, blocks); err != nil {
+// 		return ToolResult{Error: err}
+// 	}
+
+// 	// 2. Run "init" command, if any
+// 	initCmd, _ := call.Args["init"].(string)
+// 	if strings.TrimSpace(initCmd) != "" {
+// 		initOut, err := t.execInContainer(ctx, initCmd)
+// 		if err != nil {
+// 			return ToolResult{Output: initOut, Error: fmt.Errorf("init failed: %w", err)}
+// 		}
+//         utils.Logger.Debug().Str("tool", t.Name()).
+//             Msgf("Init command output: %s", initOut)
+// 	}
+
+// 	// 3. Run launch or constructed main command
+// 	launchCmd, _ := call.Args["launch"].(string)
+// 	var output string
+// 	var err error
+// 	if strings.TrimSpace(launchCmd) != "" {
+// 		output, err = t.execInContainer(ctx, launchCmd)
+// 	} else {
+// 		// For demo: just run the first file if launch not specified
+// 		if len(blocks) > 0 {
+// 			mainfile := blocks[0].FileName
+// 			run := ""
+// 			switch lang {
+// 			case "python":
+// 				run = fmt.Sprintf("python %s", mainfile)
+// 			case "bash", "sh":
+// 				run = fmt.Sprintf("sh %s", mainfile)
+// 			case "dotnet":
+// 				run = fmt.Sprintf("dotnet run --project %s", mainfile)
+// 			case "npm", "angular":
+// 				run = fmt.Sprintf("npm start")
+// 			default:
+// 				run = fmt.Sprintf("sh %s", mainfile)
+// 			}
+// 			output, err = t.execInContainer(ctx, run)
+// 		}
+// 	}
+
+// 	return ToolResult{
+// 		Output: output,
+// 		Error:  err,
+// 	}
+// }
 
 // Clean up (call at session end or from manager)
 func (t *DockerExecTool) CleanupContainer(ctx context.Context) error {

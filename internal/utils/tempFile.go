@@ -24,6 +24,10 @@ func RemoveTempDir(dir string) {
     os.RemoveAll(dir)
 }
 
+func CodeBlockRegex() *regexp.Regexp {
+	return regexp.MustCompile("(?s)```\\s*([a-zA-Z0-9_-]*)\\s*\\n(.*?)\\s*```")
+}
+
 func ExtractCodeBlocks(code string) []struct {
     Language string
     FileName string

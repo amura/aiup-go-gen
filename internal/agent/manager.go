@@ -4,6 +4,7 @@ package agent
 
 import (
 	"fmt"
+	"strings"
 
 	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/model"
@@ -29,6 +30,7 @@ type ChatManager struct {
 	maxTurns    int // e.g. 15
 	maxTokens   int // e.g. 20000
     dockerContainerPrefix string
+    errorHistory []string
 }
 
 func NewChatManager(agentList []Agent) *ChatManager {
@@ -49,7 +51,7 @@ func NewChatManager(agentList []Agent) *ChatManager {
         input:        make(chan model.Message, 4),
         output:       make(chan model.Message, 4),
         history:      []model.Message{},
-        maxTurns:   5,
+        maxTurns:   10,
         maxTokens:  20000,
         turns:      0,
         tokenCount: 0,
@@ -149,16 +151,28 @@ func (cm *ChatManager) Start() {
                 // --- Tool Result with error: route back to origin agent for repair ---
 				if resp.MessageType == model.TypeToolResult && resp.IsError {
 					targetAgent := resp.OriginAgent
-					utils.Logger.Warn().
+					utils.Logger.Error().
 						Str("target_agent", targetAgent).
 						Msgf("ToolRunner returned error, routing back to original agent for fix.")
+                    cm.errorHistory = append(cm.errorHistory, resp.Content)
 					if inChan, ok := cm.agentInputs[targetAgent]; ok {
+                        var errorSummary string
+                        if len(cm.errorHistory) > 0 {
+                            errorSummary = "Previous execution errors:\n" + strings.Join(cm.errorHistory, "\n---\n") + "\n"
+                        } else {
+                            errorSummary = ""
+                        }
+
+                        newPrompt := fmt.Sprintf(
+                            "ERROR executing previous code:\n%s\nOriginal request: %s\nPlease fix and retry.",
+                            errorSummary, resp.OriginContent,
+)
 						fixMsg := model.Message{
 							Sender:      "Manager",
-                            Content:     fmt.Sprintf("ERROR executing previous code:\n%s\n\nOriginal request: %s\n\nPlease fix and retry.",
-                                resp.Content, resp.OriginContent),MessageType: model.TypeRoute,
+                            Content:     newPrompt,MessageType: model.TypeRoute,
 							RouteTarget: targetAgent,
 						}
+                      
 						inChan <- fixMsg
 						resp = <-cm.agentOutputs[targetAgent]
 						continue // chain: check next response

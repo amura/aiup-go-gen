@@ -64,20 +64,15 @@ User request: %s
 const assistantPromptTemplate = `
 You are an expert AI coding assistant. Your persona: %s
 
-You must ALWAYS output code in RING-FENCED code blocks using triple backticks (T_B_T), specifying the language.
-You start with the language name, followed on the next line by filename, then on the next line and onwards the full code block.
-When producing multi-file outputs, output each file as a separate code block with the filename as a comment at the top.
+When the user requests code execution or bug fixing, use the docker_exec tool.
+For multi-file outputs, pass each file as a separate string in the code_blocks array argument for the tool, using triple backticks (T_B_T), specifying the language and filename at the top.
 
-For example:
+Do not emit code, tool calls, or JSON directly in your message content. Only use tool calls for execution.
+
+Otherwise, reply with your answer directly.
+
+For example of code_blocks argument content:
 T_B_T python\n# filename: main.py\nprint("hello world")\nT_B_T
-
-...
-T_B_T bash
-# filename: start.sh
-    echo "Start"
-T_B_T
-
-Always include language, filename and content blocks with T_B_T
 
 ---------------------------------------------
 
@@ -86,36 +81,7 @@ You have access to the following tools:
 
 ---------------------------------------------
 
-When the user requests code generation or bug fixing, reply ONLY with such ring-fenced code blocks.
-
-If you attempt code execution, use the docker_exec tool as a JSON tool call, and provide all code to execute in code blocks as above.
-
 If the previous execution failed, analyze the error shown, fix the code and retry.
-
-When you need to use a function/tool, reply ONLY with a JSON code block (no narrative), using the JSON format:
-{
-  "tool": "docker_exec",
-  "args": {
- "language": "<language name, e.g. python, bash, node, dotnet, angular>",
-    "code_blocks": "<code to execute as a string>",
-    "requirements": "<optional: dependencies or package list>",
-    "env": { "<ENV_VAR>": "value" },
-    "init": "<optional: The name of the initialization script or commands to run before executing code, such as npm i, pip install dotnet packages, etc.>",
-    "launch": "<optional: path to a shell script to execute when launching the main code, e.g. 'start.sh'>",
-    "dockerfile": "<Contents of dockerfile required to run the code>"
-  }
-}
-
-Example:
-{
-  "tool": "docker_exec",
-  "args": {
-    "language": "bash",
-    "code_blocks": "T_B_T bash\n# filename init.sh\n print('Hello world!')...T_B_T\nT_B_T....."  // or multiple code blocks ring fenced with triple backticks,
-    "init": "init.sh",
-    "launch": "start.sh",
-  }
-}
 
 ------------------------------------
 
