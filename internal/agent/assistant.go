@@ -34,11 +34,12 @@ When you need to use a function/tool, reply ONLY with a JSON code block (no narr
   "tool": "docker_exec",
   "args": {
     "language": "<language name, e.g. python, bash, node, dotnet, angular>",
-    "code": "<code to execute as a string>",
+    "code_blocks": "<code to execute as a string>",
     "requirements": "<optional: dependencies or package list>",
     "env": { "<ENV_VAR>": "value" },
     "init": "<optional: The name of the initialization script or commands to run before executing code, such as npm i, pip install dotnet packages, etc.>",
-    "launch": "<optional: path to a shell script to execute when launching the main code, e.g. 'start.sh'>"
+    "launch": "<optional: path to a shell script to execute when launching the main code, e.g. 'start.sh'>",
+    "dockerfile": "<Contents of dockerfile required to run the code>"
   }
 }
 
@@ -47,7 +48,7 @@ Example:
   "tool": "docker_exec",
   "args": {
     "language": "python",
-    "code": "print('Hello world!')"  // or multiple code blocks ring fenced with triple backticks,
+    "code_blocks": "print('Hello world!')"  // or multiple code blocks ring fenced with triple backticks,
     "init": "pip install requests",
     "launch": "start.sh",
   }
@@ -95,12 +96,13 @@ When you need to use a function/tool, reply ONLY with a JSON code block (no narr
 {
   "tool": "docker_exec",
   "args": {
-    "language": "<language name, e.g. python, bash, node, dotnet, angular>",
-    "code": "<code blocks to execute as a string, ring-fenced with triple backticks>",
+ "language": "<language name, e.g. python, bash, node, dotnet, angular>",
+    "code_blocks": "<code to execute as a string>",
     "requirements": "<optional: dependencies or package list>",
     "env": { "<ENV_VAR>": "value" },
     "init": "<optional: The name of the initialization script or commands to run before executing code, such as npm i, pip install dotnet packages, etc.>",
-    "launch": "<optional: path to a shell script to execute when launching the main code, e.g. 'start.sh'>"
+    "launch": "<optional: path to a shell script to execute when launching the main code, e.g. 'start.sh'>",
+    "dockerfile": "<Contents of dockerfile required to run the code>"
   }
 }
 
@@ -108,9 +110,9 @@ Example:
 {
   "tool": "docker_exec",
   "args": {
-    "language": "python",
-    "code": "....print('Hello world!')..."  // or multiple code blocks ring fenced with triple backticks,
-    "init": "pip install requests",
+    "language": "bash",
+    "code_blocks": "T_B_T bash\n# filename init.sh\n print('Hello world!')...T_B_T\nT_B_T....."  // or multiple code blocks ring fenced with triple backticks,
+    "init": "init.sh",
     "launch": "start.sh",
   }
 }
@@ -188,6 +190,30 @@ func (a *AssistantAgent) Start(input <-chan model.Message, output chan<- model.M
 			//     }
 			//     continue
 			// }
+
+
+
+            // --- OpenAI function calling: check ToolCalls ---
+            if len(llmResp.ToolCalls) > 0 {
+                for _, toolCall := range llmResp.ToolCalls {
+                    if a.toolRegistry.HasTool(toolCall.Name) {
+                        utils.Logger.Debug().
+                            Str("tool_call", fmt.Sprintf("%+v", toolCall)).
+                            Msg("Tool call from OpenAI response")
+                        output <- model.Message{
+                            Sender:      a.name,
+                            MessageType: model.TypeToolCall,
+                            ToolCall: &tools.ToolCall{
+			                    Name:   toolCall.Name,
+			                    Args:   toolCall.Args,
+			                    Caller: a.name,
+			                },
+                        }
+                    }
+                }
+                continue
+            }
+
 			// Try parsing as a tool suggestion
 			toolCall, toolDetected := tools.ParseToolCall(llmResp.Content)
 			if toolDetected && a.toolRegistry.HasTool(toolCall.Name) {

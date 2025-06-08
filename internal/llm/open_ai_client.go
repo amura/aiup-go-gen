@@ -36,28 +36,27 @@ func NewOpenAILLMClient(client *openai.Client, tools []openai.Tool) *OpenAILLMCl
     return &OpenAILLMClient{client: client, tools: tools}
 }
 
-
 func BuildOpenAIToolsFromConfig(cfg *config.McpConfig) []openai.Tool {
     var tools []openai.Tool
     for _, t := range cfg.McpTools {
         for _, op := range t.Operations {
-            props := map[string]interface{}{}
-            for _, arg := range op.AllowedArgs {
-                props[arg] = map[string]string{"type": "string"} // or actual type
+            // Use op.Parameters directly if present, or default to empty schema
+            params := map[string]interface{}{}
+            if op.Parameters != nil {
+                params = op.Parameters
+            } else {
+                // Fallback: minimum valid schema
+                params = map[string]interface{}{
+                    "type":       "object",
+                    "properties": map[string]interface{}{},
+                    "required":   []string{},
+                }
             }
-            requiredArgs := op.RequiredArgs
-            if requiredArgs == nil {
-                requiredArgs = []string{}
-            }
-            schema := map[string]interface{}{
-                "type":       "object",
-                "properties": props,
-                "required":   requiredArgs,
-            }
+
             fn := &openai.FunctionDefinition{
-                Name:       op.Name,
+                Name:        op.Name,
                 Description: op.Description,
-                Parameters:  schema,
+                Parameters:  params,
             }
             tools = append(tools, openai.Tool{
                 Type:     "function",
@@ -75,7 +74,7 @@ func (c *OpenAILLMClient) Generate(prompt string) (LLMResponse, error) {
 	// utils.Logger.Debug().Str("module", "llm").Msgf("Using tools: %v", tools)
 
 	req := openai.ChatCompletionRequest{
-        Model:   "gpt-4-turbo", // or your configured model
+        Model:   "gpt-4.1", // or your configured model
         Messages: []openai.ChatCompletionMessage{
             {Role: openai.ChatMessageRoleSystem, Content: prompt},
         },

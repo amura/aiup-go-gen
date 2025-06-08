@@ -1,50 +1,78 @@
 mcp_tools:
-  - name: stripe_mcp
-    endpoint: http://localhost:8080
-    description: >
-      Use this tool to interact with the Stripe MCP API (customer, charge, payment intent, etc.) only when payment related features are required and stripe is mentioned as the platform.
-    operations:
-      - name: create_customer
-        path: /v1/customers
-        method: POST
-        description: Create a Stripe customer
-        example_args: { "email": "user@example.com" }
-        required: []
-      # - name: retrieve_customer
-      #   path: /v1/customers/{id}
-      #   method: GET
-      #   description: Get customer by ID
-      #   example_args: {}
-      # - name: create_payment_intent
-      #   path: /v1/payment_intents
-      #   method: POST
-      #   description: Create a new payment intent
-      #   example_args: { "amount": 5000, "currency": "usd" }
-      # - name: list_charges
-      #   path: /v1/charges
-      #   method: GET
-      #   description: List all charges
-      #   example_args: {}
-      # ...add as many as you wish from MCP docs...
-  - name: docker_exec
-    operations:
-      - name: docker_exec
-        description: Execute and validate code blocks by executing them in a docker container
-        example_args: { "code_blocks": "```bash\n #filename test.sh ```", "init": "init.sh", "launch.sh": "launch.sh", "docker_file": "FROM node\n..." }
-        required: []
-  # - name: github_mcp
-  #   endpoint: http://localhost:8090
-  #   description: >
-  #     Use this tool to interact with the GitHub MCP API (repository, issue, user management, etc.).
-  #   operations:
-  #     - name: Create Repo
-  #       path: /repos
-  #       method: POST
-  #       description: Create a new GitHub repository
-  #       example_args: { "name": "my-repo", "private": false }
-  #     - name: List Issues
-  #       path: /repos/{owner}/{repo}/issues
-  #       method: GET
-  #       description: List issues for a repository
-  #       example_args: {}
-      # ...extend for AWS, etc...
+- name: stripe_mcp
+  endpoint: http://localhost:8080
+  description: >
+    Use this tool to interact with the Stripe MCP API (customer, charge, payment intent, etc.) only when payment related features are required and stripe is mentioned as the platform.
+  operations:
+    - name: create_customer
+      path: /v1/customers
+      method: POST
+      description: Create a Stripe customer
+      example_args:
+        email: user@example.com
+      parameters:
+        type: object
+        properties:
+          email:
+            type: string
+            description: Customer's email address.
+          name:
+            type: string
+            description: Customer's full name.
+        required:
+          - email
+    - name: create_payment_intent
+      path: /v1/payment_intents
+      method: POST
+      description: Create a new payment intent
+      example_args:
+        amount: 5000
+        currency: usd
+      parameters:
+        type: object
+        properties:
+          amount:
+            type: integer
+            description: Amount in smallest currency unit (e.g. cents).
+          currency:
+            type: string
+            description: Three-letter ISO currency code, in lowercase.
+        required:
+          - amount
+          - currency
+
+- name: docker_exec
+  operations:
+    - name: docker_exec
+      description: Execute and validate code blocks by executing them in a docker container. Ensure to include initialization and launch scripts to install dependencies needed and then launch the solution.
+      example_args:
+        code_blocks: |
+          ```bash
+          # filename: test.sh
+          echo "Hello world"
+          ```
+          ```bash
+          # filename: init.sh
+          apt-get update && apt-get install -y nodejs
+          ```
+      parameters:
+        type: object
+        properties:
+          language:
+            type: string
+            description: The language or environment (e.g., python, bash, dotnet, angular)
+          code_blocks:
+            type: string
+            description: The code blocks to execute, ring-fenced with triple backticks and filename.
+          init:
+            type: string
+            description: Optional initialization script or command.
+          launch:
+            type: string
+            description: Optional launch command or shell script to execute.
+          docker_file:
+            type: string
+            description: Optional Dockerfile content if a custom image is needed.
+        required:
+          - language
+          - code_blocks

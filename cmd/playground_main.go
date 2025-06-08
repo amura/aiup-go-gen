@@ -47,6 +47,10 @@ func main() {
 	mcp_cfg, err := config.LoadConfig(mcpCfgPath)
 	if err != nil { panic(err) }
 
+// 	if err := config.ValidateMcpConfig(cfg); err != nil {
+//     log.Fatalf("Config validation error: %v", err)
+// }
+
 	registry := tools.NewToolRegistry()
 
 	for _, mcp := range mcp_cfg.McpTools {
