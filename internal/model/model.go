@@ -26,6 +26,7 @@ type Message struct {
     RouteTarget string // For routing messages to specific agents
     IsError bool // Indicates if this message is an error
     Error error
+    ErrorDetail *tools.ExecErrorDetail
     OriginAgent    string // Who initiated this request
     OriginContent  string // What was the original subtask/request
     Tokens *openai.Usage // For LLM responses, if applicable

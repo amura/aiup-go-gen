@@ -1,13 +1,13 @@
 package utils
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-
 )
 
 func CreateTempDir() string {
@@ -77,4 +77,12 @@ func ExtractCodeBlocks(code string) []struct {
     }
     fmt.Println("Extracted code blocks:", len(blocks))
     return blocks
+}
+
+func SafeMarshal(v interface{}) ([]byte, error) {
+	return json.Marshal(v)
+}
+
+func SafeUnmarshal(data []byte, v interface{}) error {
+	return json.Unmarshal(data, v)
 }

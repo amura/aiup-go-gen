@@ -32,3 +32,4 @@ go.work.sum
 .DS_Store
 Thumbs.db
 **/.env
+**__debug_bin*

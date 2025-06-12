@@ -31,9 +31,22 @@ func (t *FetchArxivTool) Name() string { return "fetch_arxiv" }
 func (t *FetchArxivTool) Description() string {
     return "Fetch recent arXiv papers on a given topic."
 }
-func (t *FetchArxivTool) Parameters() map[string]string {
-    return map[string]string{"query": "string"}
+// func (t *FetchArxivTool) Parameters() map[string]string {
+//     return map[string]string{"query": "string"}
+// }
+func (t *FetchArxivTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"query": map[string]interface{}{
+				"type":        "string",
+				"description": "Search query for arXiv",
+			},
+		},
+		"required": []string{"query"},
+	}
 }
+
 func (t *FetchArxivTool) Call(ctx context.Context, call ToolCall) ToolResult {
 	metrics.ToolCallsTotal.WithLabelValues(t.Name(), call.Caller).Inc()
 	timer := prometheus.NewTimer(metrics.ToolLatencySeconds.WithLabelValues(t.Name(), call.Caller))

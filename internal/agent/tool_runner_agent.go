@@ -26,12 +26,15 @@ func (a *ToolRunnerAgent) Start(input <-chan model.Message, output chan<- model.
 				Str("agent", a.name).
 				Str("event", "received_message").
 				Msgf("Received: %s", msg.Content)
+				
 			if msg.MessageType == model.TypeToolCall && msg.ToolCall != nil {
 				result := a.registry.Call(context.TODO(), *msg.ToolCall)
+
 				utils.Logger.Debug().
 					Str("agent", a.name).
 					Str("tool", msg.ToolCall.Name).
-					Msgf("Tool call result: %v", result.Output)
+					Msgf("Tool call result:\n\n  %v \n\n", result.Output)
+
 				output <- model.Message{
 					Sender:      a.name,
 					Content:     fmt.Sprintf("%v", result.Output), // Safely stringify any output,

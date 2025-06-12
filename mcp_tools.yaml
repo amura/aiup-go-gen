@@ -46,15 +46,20 @@ mcp_tools:
     - name: docker_exec
       description: Execute and validate code blocks by executing them in a docker container. Ensure to include initialization and launch scripts to install dependencies needed and then launch the solution.
       example_args:
-        code_blocks: |
-          ```bash
-          # filename: test.sh
-          echo "Hello world"
-          ```
-          ```bash
-          # filename: init.sh
-          apt-get update && apt-get install -y nodejs
-          ```
+        code_blocks:
+          - |
+            ```bash
+            # filename: test.sh
+            echo "Hello world"
+            ```
+          - |
+            ```bash
+            # filename: init.sh
+            apt-get update && apt-get install -y nodejs
+            ```
+        init: "init.sh"
+        launch: "test.sh"
+        timeout: "90"
       parameters:
         type: object
         properties:
@@ -62,14 +67,33 @@ mcp_tools:
             type: string
             description: The language or environment (e.g., python, bash, dotnet, angular)
           code_blocks:
-            type: string
-            description: The code blocks to execute, ring-fenced with triple backticks and filename.
+            type: array
+            description: List of code files to execute, each with language, filename, and code.
+            items:
+                type: object
+                properties:
+                  language:
+                    type: string
+                    description: File language (e.g., python, bash, sh, typescript)
+                  filename:
+                    type: string
+                    description: Name and full path of the code file (e.g., main.py, app\start.sh)
+                  code:
+                    type: string
+                    description: The full code/content of the file.
+                required:
+                  - language
+                  - filename
+                  - code
           init:
             type: string
             description: Optional initialization script or command.
           launch:
             type: string
             description: Optional launch command or shell script to execute.
+          timeout:
+            type: number
+            description: The max timeout in seconds for which either launch or init commands should be executed before termination. Avoids waiting for ever.
           docker_file:
             type: string
             description: Optional Dockerfile content if a custom image is needed.

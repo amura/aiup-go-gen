@@ -69,6 +69,7 @@ func (cm *ChatManager) Start() {
 	utils.Logger.Debug().Msg(fmt.Sprintf("Starting ChatManager with agents: %d", len(cm.agents)))
 
     go func() {
+        
 		for {
 			msg := <-cm.input
 			utils.Logger.Debug().
@@ -150,37 +151,63 @@ func (cm *ChatManager) Start() {
 
                 // --- Tool Result with error: route back to origin agent for repair ---
 				if resp.MessageType == model.TypeToolResult && resp.IsError {
-					targetAgent := resp.OriginAgent
-					utils.Logger.Error().
-						Str("target_agent", targetAgent).
-						Msgf("ToolRunner returned error, routing back to original agent for fix.")
-                    cm.errorHistory = append(cm.errorHistory, resp.Content)
-					if inChan, ok := cm.agentInputs[targetAgent]; ok {
-                        var errorSummary string
-                        if len(cm.errorHistory) > 0 {
-                            errorSummary = "Previous execution errors:\n" + strings.Join(cm.errorHistory, "\n---\n") + "\n"
-                        } else {
-                            errorSummary = ""
-                        }
+                    targetAgent := resp.OriginAgent
+                    utils.Logger.Error().
+                        Str("target_agent", targetAgent).
+                        Msgf("ToolRunner returned error, routing back to original agent for fix.")
 
-                        newPrompt := fmt.Sprintf(
-                            "ERROR executing previous code:\n%s\nOriginal request: %s\nPlease fix and retry.",
-                            errorSummary, resp.OriginContent,
-)
-						fixMsg := model.Message{
-							Sender:      "Manager",
-                            Content:     newPrompt,MessageType: model.TypeRoute,
-							RouteTarget: targetAgent,
-						}
-                      
-						inChan <- fixMsg
-						resp = <-cm.agentOutputs[targetAgent]
-						continue // chain: check next response
-					} else {
-						cm.output <- model.Message{Sender: "Manager", Content: "[ERROR] Could not find origin agent: " + targetAgent}
-						break
-					}
-				}
+                    // --- Compose structured error history ---
+                    var errorSummary string
+                    if resp.ErrorDetail != nil {
+                        errSection := fmt.Sprintf(`
+                [ERROR: Docker Exec - %s phase]
+                Command run:
+                %s
+
+                Output/Error:
+                %s
+
+                Internal error:
+                %s
+                `, resp.ErrorDetail.Phase, resp.ErrorDetail.Command, resp.ErrorDetail.Output, resp.ErrorDetail.ErrMsg)
+                        cm.errorHistory = append(cm.errorHistory, errSection)
+                    } else {
+                        cm.errorHistory = append(cm.errorHistory, resp.Content)
+                    }
+
+                    if len(cm.errorHistory) > 0 {
+                        errorSummary = "Previous execution errors:\n" + strings.Join(cm.errorHistory, "\n---\n") + "\n"
+                    } else {
+                        errorSummary = ""
+                    }
+
+                    newPrompt := fmt.Sprintf(
+                        `ERROR executing previous code.
+
+                %s
+                Original request: 
+                %s
+
+                Please fix the code and retry.`,
+                        errorSummary, resp.OriginContent,
+                    )
+
+                    fixMsg := model.Message{
+                        Sender:      "Manager",
+                        Content:     newPrompt,
+                        MessageType: model.TypeRoute,
+                        RouteTarget: targetAgent,
+                    }
+
+                    if inChan, ok := cm.agentInputs[targetAgent]; ok {
+                        inChan <- fixMsg
+                        resp = <-cm.agentOutputs[targetAgent]
+                        continue // chain: check next response
+                    } else {
+                        cm.output <- model.Message{Sender: "Manager", Content: "[ERROR] Could not find origin agent: " + targetAgent}
+                        break
+                    }
+                }
 
 				// --- Route as instructed to agent (could be Assistant, etc) ---
 				if resp.MessageType == model.TypeRoute {

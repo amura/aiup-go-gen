@@ -9,10 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-    "github.com/google/uuid"
+	"time"
 
 	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/utils"
+	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -26,9 +27,9 @@ type DockerExecTool struct{
 }
 
 type CodeBlock struct {
-	Language string
-	FileName string
-	Content  string
+	Language string `json:"language"`
+	FileName string `json:"filename"`
+	Code     string `json:"code"`
 }
 
 const DefaultDockerImage = "node:20"
@@ -43,27 +44,38 @@ func NewDockerExecTool(prefix string, image string) *DockerExecTool {
     }
 }
 
+
+
 func (t *DockerExecTool) Name() string        { return "docker_exec" }
 func (t *DockerExecTool) Description() string { return "Execute code/scripts in a persistent Docker container. Supports python, bash, sh, dotnet, angular cli, npm." }
 
-
-func (t *DockerExecTool) Parameters() map[string]string {
-    return map[string]string{
-        "language": "string",
-        "code":     "string",
-        "script":   "string", // alternative to code, if providing a shell script path
-    }
+// Should return the function schema for OpenAI, or a description of accepted parameters
+func (t *DockerExecTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"language":   "string",
+		"code_blocks": []map[string]string{
+			{
+				"language": "string",
+				"filename": "string",
+				"code":     "string",
+			},
+		},
+		"init":   "string",
+		"launch": "string",
+	}
 }
 
-// Language to Docker image mapping (could also be loaded from config)
+// Language to Docker image mapping
 var langImageMap = map[string]string{
     "python":    "python:3.11-slim",
-    "bash":      "ubuntu:22.04",
-    "sh":        "alpine:latest",
+    "bash":      "angular-dev:latest", //"ubuntu:22.04", //todo later
+    "sh":        "angular-dev:latest", //alpine:latest",
     "dotnet":    "mcr.microsoft.com/dotnet/sdk:8.0",
     "npm":       "node:20",
-    "angular": "node:20", // assuming Angular CLI is installed in the container
+    // "angular":   "node:20", // angular cli must be npm-installed in init if needed
+    "angular": "angular-dev:latest",
 }
+
 
 
 // Ensure persistent container for the session
@@ -82,7 +94,8 @@ func (t *DockerExecTool) ensureContainer(ctx context.Context, lang string) error
 	containerName := fmt.Sprintf("%s-%s", t.prefix, id)
 	workspace := filepath.Join(os.TempDir(), "dockerexec-"+id)
 	os.MkdirAll(workspace, 0o755)
-	// Run container detached
+    utils.Logger.Debug().Str("containerName", containerName).Str("image", img).Msg("About to start the container for the session")
+
 	cmd := exec.CommandContext(ctx, "docker", "run", "-d", "--name", containerName, "-w", "/workspace", "-v", workspace+":/workspace", img, "tail", "-f", "/dev/null")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -94,59 +107,54 @@ func (t *DockerExecTool) ensureContainer(ctx context.Context, lang string) error
 	return nil
 }
 
-// Copy files to container (using docker cp)
 func (t *DockerExecTool) copyFilesToContainer(ctx context.Context, files []CodeBlock) error {
+	utils.Logger.Debug().Str("tool", t.Name()).Msg("About to loop over files and write them out")
 	for _, f := range files {
 		dest := filepath.Join(t.workspace, f.FileName)
-		if err := os.WriteFile(dest, []byte(f.Content), 0644); err != nil {
-			return fmt.Errorf("failed to write temp file: %v", err)
+		utils.Logger.Debug().Str("tool", t.Name()).Msgf("Processing file %s", dest)
+
+		// Ensure the parent directories exist
+		parentDir := filepath.Dir(dest)
+        utils.Logger.Debug().Str("tool", t.Name()).Msgf("Checking parent path exists and creating if not")
+		if err := os.MkdirAll(parentDir, 0o755); err != nil {
+			utils.Logger.Error().Str("tool", t.Name()).Msgf("Failed to create directories in path %s: %v", parentDir, err)
+			return fmt.Errorf("error creating directories in path %s: %w", parentDir, err)
+		}
+
+		if err := os.WriteFile(dest, []byte(f.Code), 0644); err != nil {
+			utils.Logger.Error().Str("tool", t.Name()).Msgf("Failed to write file: %s: %v", dest, err)
+			return fmt.Errorf("failed to write temp file: %w", err)
 		}
 		// No need to docker cp since we mounted the workspace on start
 	}
 	return nil
 }
 
-func (t *DockerExecTool) execInContainer(ctx context.Context, command string) (string, error) {
-	args := []string{"exec", t.containerName, "sh", "-c", command}
-	output, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
-	return string(output), err
-}
+func (t *DockerExecTool) execInContainer(ctx context.Context, command string, timeout time.Duration) (string, error) {
+    args := []string{"exec", t.containerName, "sh", "-c", command}
+    ctx, cancel := context.WithTimeout(ctx, timeout)
+    defer cancel()
 
-// ExtractCodeBlocks parses an array of strings in code_blocks format
-func ExtractCodeBlocks(blocks []string) []CodeBlock {
-	var out []CodeBlock
-	re := utils.CodeBlockRegex() // see below, or use your preferred regex
-	for _, block := range blocks {
-		match := re.FindStringSubmatch(block)
-		if len(match) >= 4 {
-			lang := strings.TrimSpace(match[1])
-			filename := ""
-			content := match[3]
-			lines := strings.SplitN(match[2], "\n", 2)
-			if len(lines) > 0 && strings.HasPrefix(lines[0], "# filename:") {
-				filename = strings.TrimSpace(strings.TrimPrefix(lines[0], "# filename:"))
-				if len(lines) > 1 {
-					content = lines[1]
-				}
-			}
-			if filename == "" {
-				filename = "main.txt"
-			}
-			out = append(out, CodeBlock{
-				Language: lang,
-				FileName: filename,
-				Content:  content,
-			})
-		}
-	}
-	return out
+    cmd := exec.CommandContext(ctx, "docker", args...)
+    output, err := cmd.CombinedOutput()
+
+    if ctx.Err() == context.DeadlineExceeded {
+        return string(output), fmt.Errorf("command timed out after %v", timeout)
+    }
+    return string(output), err
 }
 
 func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
-	utils.Logger.Debug().Str("tool", t.Name()).Msgf("Executing docker_exec tool call: %v", call.Caller)
+	utils.Logger.Debug().Str("tool", t.Name()).Msgf("###############################\nExecuting docker_exec tool call: %v \n##############################", call.Caller)
 	metrics.ToolCallsTotal.WithLabelValues(t.Name(), call.Caller).Inc()
 	timer := prometheus.NewTimer(metrics.ToolLatencySeconds.WithLabelValues(t.Name(), call.Caller))
 	defer timer.ObserveDuration()
+    timeoutSec := 90 // default
+    if to, ok := call.Args["timeout"].(float64); ok {
+        timeoutSec = int(to)
+    }
+    timeoutDuration := time.Duration(timeoutSec)*time.Second
+
 	langRaw, _ := call.Args["language"]
 	lang := strings.ToLower(fmt.Sprintf("%v", langRaw))
 
@@ -155,28 +163,49 @@ func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
 		return ToolResult{Error: err}
 	}
 
-	// 1. Extract all code blocks and write to workspace
+    
+	// 1. Parse code_blocks as array of CodeBlock
 	rawBlocks, ok := call.Args["code_blocks"].([]interface{})
 	if !ok || len(rawBlocks) == 0 {
 		return ToolResult{Error: fmt.Errorf("missing or invalid code_blocks argument")}
 	}
-	var codeBlockStrs []string
+    utils.Logger.Debug().Str("tool", t.Name()).Msgf("About to process code blocks - %v", len(rawBlocks))
+	var blocks []CodeBlock
 	for _, b := range rawBlocks {
-		if s, ok := b.(string); ok {
-			codeBlockStrs = append(codeBlockStrs, s)
+		var cb CodeBlock
+		// If map[string]interface{}, must re-marshal/re-unmarshal for type safety
+		bytes, _ := utils.SafeMarshal(b)
+		if err := utils.SafeUnmarshal(bytes, &cb); err == nil {
+			blocks = append(blocks, cb)
 		}
 	}
-	blocks := ExtractCodeBlocks(codeBlockStrs)
+	if len(blocks) == 0 {
+		return ToolResult{Error: fmt.Errorf("no valid code blocks found")}
+	}
+
 	if err := t.copyFilesToContainer(ctx, blocks); err != nil {
 		return ToolResult{Error: err}
 	}
 
+    utils.Logger.Debug().Str("tool", t.Name()).Msg("Finished copying files to container and about to run init and launch commands")
+
 	// 2. Run "init" command, if any
 	initCmd, _ := call.Args["init"].(string)
 	if strings.TrimSpace(initCmd) != "" {
-		initOut, err := t.execInContainer(ctx, initCmd)
+        utils.Logger.Debug().Str("tool", t.Name()).Msgf("About to execute the init command %s", initCmd)
+		initOut, err := t.execInContainer(ctx, initCmd, timeoutDuration)
 		if err != nil {
-			return ToolResult{Output: initOut, Error: fmt.Errorf("init failed: %w", err)}
+            errDetail := formatExecError("init", initCmd, initOut, err.Error())
+            return ToolResult{
+                Output: errDetail,
+                Error: err,
+                ErrorDetail: &ExecErrorDetail{
+                    Phase:   "init",
+                    Command: initCmd,
+                    Output:  initOut,
+                    ErrMsg:  err.Error(),
+                },
+            }
 		}
 		utils.Logger.Debug().Str("tool", t.Name()).Msgf("Init command output: %s", initOut)
 	}
@@ -186,7 +215,10 @@ func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
 	var output string
 	var err error
 	if strings.TrimSpace(launchCmd) != "" {
-		output, err = t.execInContainer(ctx, launchCmd)
+        // todo if angular, path the command to ensure no TTY expected
+        launchCmd = patchAngularCmd(launchCmd)
+        utils.Logger.Debug().Str("tool", t.Name()).Msgf("About to execute launch command %s", launchCmd)
+		output, err = t.execInContainer(ctx, launchCmd, timeoutDuration)
 	} else if len(blocks) > 0 {
 		mainfile := blocks[0].FileName
 		run := ""
@@ -202,78 +234,28 @@ func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
 		default:
 			run = fmt.Sprintf("sh %s", mainfile)
 		}
-		output, err = t.execInContainer(ctx, run)
+        utils.Logger.Debug().Str("tool", t.Name()).Msgf("About to execute launch command %s", run)
+		output, err = t.execInContainer(ctx, run, timeoutDuration)
 	}
 
+    if err != nil {
+        errDetail := formatExecError("launch", launchCmd, output, err.Error())
+        return ToolResult{
+            Output: errDetail,
+            Error:  fmt.Errorf("init failed: %w", err),
+            ErrorDetail: &ExecErrorDetail{
+                Phase:   "launch",
+                Command: launchCmd,
+                Output:  output,
+                ErrMsg:  err.Error(),
+            },
+        }
+    }
 	return ToolResult{
 		Output: output,
 		Error:  err,
 	}
 }
-
-// func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
-//     fmt.Print("Executing docker_exec tool call: ", call.Caller, "\n")
-//     metrics.ToolCallsTotal.WithLabelValues(t.Name(), call.Caller).Inc()
-// 	timer := prometheus.NewTimer(metrics.ToolLatencySeconds.WithLabelValues(t.Name(), call.Caller))
-// 	defer timer.ObserveDuration()
-// 	langRaw, _ := call.Args["language"]
-// 	lang := strings.ToLower(fmt.Sprintf("%v", langRaw))
-
-// 	if err := t.ensureContainer(ctx, lang); err != nil {
-// 		utils.Logger.Error().Msgf("Failed to ensure container: %v", err)
-// 		return ToolResult{Error: err}
-// 	}
-
-// 	// 1. Extract all code blocks and write to workspace
-// 	code, _ := call.Args["code"].(string)
-// 	blocks := utils.ExtractCodeBlocks(code)
-// 	if err := t.copyFilesToContainer(ctx, blocks); err != nil {
-// 		return ToolResult{Error: err}
-// 	}
-
-// 	// 2. Run "init" command, if any
-// 	initCmd, _ := call.Args["init"].(string)
-// 	if strings.TrimSpace(initCmd) != "" {
-// 		initOut, err := t.execInContainer(ctx, initCmd)
-// 		if err != nil {
-// 			return ToolResult{Output: initOut, Error: fmt.Errorf("init failed: %w", err)}
-// 		}
-//         utils.Logger.Debug().Str("tool", t.Name()).
-//             Msgf("Init command output: %s", initOut)
-// 	}
-
-// 	// 3. Run launch or constructed main command
-// 	launchCmd, _ := call.Args["launch"].(string)
-// 	var output string
-// 	var err error
-// 	if strings.TrimSpace(launchCmd) != "" {
-// 		output, err = t.execInContainer(ctx, launchCmd)
-// 	} else {
-// 		// For demo: just run the first file if launch not specified
-// 		if len(blocks) > 0 {
-// 			mainfile := blocks[0].FileName
-// 			run := ""
-// 			switch lang {
-// 			case "python":
-// 				run = fmt.Sprintf("python %s", mainfile)
-// 			case "bash", "sh":
-// 				run = fmt.Sprintf("sh %s", mainfile)
-// 			case "dotnet":
-// 				run = fmt.Sprintf("dotnet run --project %s", mainfile)
-// 			case "npm", "angular":
-// 				run = fmt.Sprintf("npm start")
-// 			default:
-// 				run = fmt.Sprintf("sh %s", mainfile)
-// 			}
-// 			output, err = t.execInContainer(ctx, run)
-// 		}
-// 	}
-
-// 	return ToolResult{
-// 		Output: output,
-// 		Error:  err,
-// 	}
-// }
 
 // Clean up (call at session end or from manager)
 func (t *DockerExecTool) CleanupContainer(ctx context.Context) error {
@@ -296,102 +278,29 @@ func CleanupAllByPrefix(ctx context.Context, prefix string) {
 	cmd.Run()
 }
 
-// func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
-//     fmt.Print("Executing docker_exec tool call: ", call.Caller, "\n")
-//     metrics.ToolCallsTotal.WithLabelValues(t.Name(), call.Caller).Inc()
-// 	timer := prometheus.NewTimer(metrics.ToolLatencySeconds.WithLabelValues(t.Name(), call.Caller))
-// 	defer timer.ObserveDuration()
+func patchAngularCmd(cmd string) string {
+	if strings.HasPrefix(cmd, "ng new") {
+		if !strings.Contains(cmd, "--no-interactive") {
+			cmd += " --no-interactive"
+		}
+		if !strings.Contains(cmd, "--defaults") {
+			cmd += " --defaults"
+		}
+	}
+	return cmd
+}
 
-//     utils.Logger.Debug().Str("tool", t.Name()).
-//         Str("caller", call.Caller).
-//         Msgf("Received call with args: %v", call.Args)
 
-//     langRaw, ok := call.Args["language"]
-//     if !ok {
-//         return ToolResult{Error: fmt.Errorf("missing argument: language")}
-//     }
-//     lang := strings.ToLower(fmt.Sprintf("%v", langRaw))
-//     img, ok := langImageMap[lang]
-//     if !ok {
-//         return ToolResult{Error: fmt.Errorf("unsupported language: %s", lang)}
-//     }
-//     code, _ := call.Args["code"].(string)
-//     initCmd, _ := call.Args["init"].(string)
-//     launchCmd, _ := call.Args["launch"].(string)
 
-//     // Write all code blocks to temp files
-//     tmpDir := utils.CreateTempDir()
-//     blocks := utils.ExtractCodeBlocks(code)
-//     filenames := []string{}
-//     for i, block := range blocks {
-//         ext := lang
-//         if block.Language != "" {
-//             ext = block.Language
-//         }
-//         fname := fmt.Sprintf("file%d.%s", i+1, ext)
-//         utils.WriteTempFile(tmpDir, fname, block.Content)
-//         utils.Logger.Debug().Str("tool", t.Name()).
-//             Msgf("Wrote code block to temp file: %s", fname)
-//         filenames = append(filenames, fname)
-//     }
-//     defer utils.RemoveTempDir(tmpDir)
+func formatExecError(phase, cmd, output, errMsg string) string {
+	return fmt.Sprintf(`
+    [ERROR: Docker Exec - %s phase]
+    Command:
+    %s
 
-//     // Build docker base command
-//     dockerBase := []string{
-//         "docker", "run", "--rm",
-//         "-v", fmt.Sprintf("%s:/workspace", tmpDir),
-//         "-w", "/workspace",
-//         img,
-//     }
+    Output/Error:
+    %s
 
-//     // Step 1: run init, if present
-//     if strings.TrimSpace(initCmd) != "" {
-//         utils.Logger.Debug().Str("tool", t.Name()).
-//             Msgf("Running init command: %s", initCmd)
-//         cmd := append(dockerBase, "sh", "-c", initCmd)
-//         output, err := exec.CommandContext(ctx, cmd[0], cmd[1:]...).CombinedOutput()
-//         if err != nil {
-//             utils.Logger.Error().
-//                 Str("tool", t.Name()).
-//                 Msgf("Init command failed: %v, output: %s", err, string(output))
-//             return ToolResult{Output: string(output), Error: fmt.Errorf("init failed: %w", err)}
-//         }
-//     }
-
-//     // Step 2: run launch, or constructed command
-//     var cmd []string
-//     if strings.TrimSpace(launchCmd) != "" {
-//         utils.Logger.Debug().Str("tool", t.Name()).
-//             Msgf("Running launch command: %s", launchCmd)
-//         cmd = append(dockerBase, "sh", "-c", launchCmd)
-//     } else {
-//         utils.Logger.Debug().Str("tool", t.Name()).
-//             Msgf("No launch command provided, constructing from language: %s", lang)
-//         // Pick the first file as the "main" file for this language
-//         fname := ""
-//         if len(filenames) > 0 {
-//             fname = filenames[0]
-//         }
-//         switch lang {
-//         case "python":
-//             cmd = append(dockerBase, "python", fname)
-//         case "bash", "sh":
-//             cmd = append(dockerBase, "sh", fname)
-//         case "dotnet":
-//             cmd = append(dockerBase, "dotnet", "run", "--project", fname)
-//         case "npm", "angular":
-//             cmd = append(dockerBase, "sh", "-c", fmt.Sprintf("npm install && %s", fname))
-//         default:
-//             cmd = append(dockerBase, "sh", fname)
-//         }
-//     }
-//     utils.Logger.Debug().Str("tool", t.Name()).Msgf("Running command: %v", cmd)
-//     output, err := exec.CommandContext(ctx, cmd[0], cmd[1:]...).CombinedOutput()
-//     if err != nil {
-//         utils.Logger.Error().
-//             Str("tool", t.Name()).
-//             Msgf("Launch command failed: %v, output: %s", err, string(output))
-//         return ToolResult{Output: string(output), Error: fmt.Errorf("launch failed: %w", err)}
-//     }
-//     return ToolResult{Output: string(output)}
-// }
+    Internal error: %s
+    `, strings.ToUpper(phase), cmd, output, errMsg)
+}
