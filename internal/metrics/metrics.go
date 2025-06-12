@@ -38,6 +38,13 @@ var (
         },
         []string{"tool", "agent"},
     )
+    OpenAITokensTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "openai_tokens_total",
+			Help: "Total number of tokens sent/received from OpenAI",
+		},
+		[]string{"type"}, // type: prompt, completion, total
+	)
 )
 
 func StartMetricsServer(addr string) {

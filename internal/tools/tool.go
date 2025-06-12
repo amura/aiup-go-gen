@@ -15,15 +15,25 @@ type ToolCall struct {
 
 type ToolResult struct {
     Output interface{}
-    Error  error
+    Error error
+    ErrorDetail  *ExecErrorDetail
+}
+
+type ExecErrorDetail struct {
+    Phase   string
+    Command string
+    Output  string
+    ErrMsg  string
 }
 
 type Tool interface {
     Name() string
     Description() string
-    Parameters() map[string]string // name:type
+    Parameters() map[string]interface{} // name:type
     Call(ctx context.Context, call ToolCall) ToolResult
 }
+
+
 
 // ParseToolCall tries to extract a tool call from LLM output.
 func ParseToolCall(llmResp string) (ToolCall, bool) {

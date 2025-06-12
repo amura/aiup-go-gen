@@ -11,15 +11,13 @@ import (
 	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/model"
 	"aiupstart.com/go-gen/internal/tools"
-	"aiupstart.com/go-gen/internal/utils"
 
-	// "aiupstart.com/go-gen/internal/utils"
 	"github.com/joho/godotenv"
 	"github.com/sashabaranov/go-openai"
 )
 
 func main() {
-	utils.Logger.Debug().Str("module", "main").Msg("Starting AIUpStart Playground")
+	// utils.Logger.Debug().Str("module", "main").Msg("Starting AIUpStart Playground")
 
 	_ = godotenv.Load() // Loads .env file if present
 
@@ -44,10 +42,14 @@ func main() {
 		panic(err)
 	}
 	mcpCfgPath := filepath.Join(filepath.Dir(pwd), "mcp_tools.yaml")
-	utils.Logger.Debug().Str("module", "main").Msgf("Starting AIUpStart Playground with file %s", mcpCfgPath)
+	// utils.Logger.Debug().Str("module", "main").Msgf("Starting AIUpStart Playground with file %s", mcpCfgPath)
 
 	mcp_cfg, err := config.LoadConfig(mcpCfgPath)
 	if err != nil { panic(err) }
+
+// 	if err := config.ValidateMcpConfig(cfg); err != nil {
+//     log.Fatalf("Config validation error: %v", err)
+// }
 
 	registry := tools.NewToolRegistry()
 
@@ -88,7 +90,8 @@ func main() {
 	if cfg == nil || toolEnabled(cfg, "fetch_arxiv") {
 		registry.Register(&tools.FetchArxivTool{})
 	}
-	registry.Register(&tools.DockerExecTool{})
+	newDockerExec := tools.NewDockerExecTool("go-gen-","node:20")
+	registry.Register(newDockerExec)
 
 	prompt := `You are precise, helpful, and always prefer running and testing code over guessing. 
 		If the user requests a coding task, you generate high-quality, working code, and always execute it for validation.`

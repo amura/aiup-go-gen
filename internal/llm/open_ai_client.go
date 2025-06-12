@@ -8,6 +8,7 @@ import (
 	"aiupstart.com/go-gen/internal/config"
 	"aiupstart.com/go-gen/internal/utils"
 	openai "github.com/sashabaranov/go-openai"
+    "aiupstart.com/go-gen/internal/metrics"
 )
 
 type OpenAIClient struct {
@@ -35,28 +36,27 @@ func NewOpenAILLMClient(client *openai.Client, tools []openai.Tool) *OpenAILLMCl
     return &OpenAILLMClient{client: client, tools: tools}
 }
 
-
 func BuildOpenAIToolsFromConfig(cfg *config.McpConfig) []openai.Tool {
     var tools []openai.Tool
     for _, t := range cfg.McpTools {
         for _, op := range t.Operations {
-            props := map[string]interface{}{}
-            for _, arg := range op.AllowedArgs {
-                props[arg] = map[string]string{"type": "string"} // or actual type
+            // Use op.Parameters directly if present, or default to empty schema
+            params := map[string]interface{}{}
+            if op.Parameters != nil {
+                params = op.Parameters
+            } else {
+                // Fallback: minimum valid schema
+                params = map[string]interface{}{
+                    "type":       "object",
+                    "properties": map[string]interface{}{},
+                    "required":   []string{},
+                }
             }
-            requiredArgs := op.RequiredArgs
-            if requiredArgs == nil {
-                requiredArgs = []string{}
-            }
-            schema := map[string]interface{}{
-                "type":       "object",
-                "properties": props,
-                "required":   requiredArgs,
-            }
+
             fn := &openai.FunctionDefinition{
-                Name:       op.Name,
+                Name:        op.Name,
                 Description: op.Description,
-                Parameters:  schema,
+                Parameters:  params,
             }
             tools = append(tools, openai.Tool{
                 Type:     "function",
@@ -74,7 +74,7 @@ func (c *OpenAILLMClient) Generate(prompt string) (LLMResponse, error) {
 	// utils.Logger.Debug().Str("module", "llm").Msgf("Using tools: %v", tools)
 
 	req := openai.ChatCompletionRequest{
-        Model:   "gpt-4-turbo", // or your configured model
+        Model:   "gpt-4.1", // or your configured model
         Messages: []openai.ChatCompletionMessage{
             {Role: openai.ChatMessageRoleSystem, Content: prompt},
         },
@@ -87,6 +87,13 @@ func (c *OpenAILLMClient) Generate(prompt string) (LLMResponse, error) {
 		utils.Logger.Error().Err(err).Str("module", "llm").Msg("Failed to generate response from OpenAI")
 		return LLMResponse{}, fmt.Errorf("OpenAI API error: %w", err)
 	}
+    // After: resp, err := c.client.CreateChatCompletion(...)
+    metrics.OpenAITokensTotal.WithLabelValues("prompt").Add(float64(resp.Usage.PromptTokens))
+    metrics.OpenAITokensTotal.WithLabelValues("completion").Add(float64(resp.Usage.CompletionTokens))
+    metrics.OpenAITokensTotal.WithLabelValues("total").Add(float64(resp.Usage.TotalTokens))
+    utils.Logger.Debug().Str("module", "llm").Msgf("Token usage: prompt=%d, completion=%d, total=%d",
+        resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
+
 	if len(resp.Choices) == 0 {
 		utils.Logger.Error().Str("module", "llm").Msg("No choices returned from OpenAI API")
 		return LLMResponse{}, fmt.Errorf("no choices returned from OpenAI API")
@@ -95,6 +102,7 @@ func (c *OpenAILLMClient) Generate(prompt string) (LLMResponse, error) {
 	// Prepare response
     llmResp := LLMResponse{
         Content: resp.Choices[0].Message.Content, // for narrative/fallback
+        Tokens: &resp.Usage,
     }
 
     // Extract and parse tool calls if any

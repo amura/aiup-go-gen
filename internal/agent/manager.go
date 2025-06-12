@@ -4,6 +4,7 @@ package agent
 
 import (
 	"fmt"
+	"strings"
 
 	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/model"
@@ -23,6 +24,13 @@ type ChatManager struct {
 	history       []model.Message
 	// context       map[string]interface{}
 	input, output chan model.Message
+    // for limiting the number of iterations
+    turns       int
+	tokenCount  int
+	maxTurns    int // e.g. 15
+	maxTokens   int // e.g. 20000
+    dockerContainerPrefix string
+    errorHistory []string
 }
 
 func NewChatManager(agentList []Agent) *ChatManager {
@@ -43,6 +51,10 @@ func NewChatManager(agentList []Agent) *ChatManager {
         input:        make(chan model.Message, 4),
         output:       make(chan model.Message, 4),
         history:      []model.Message{},
+        maxTurns:   10,
+        maxTokens:  20000,
+        turns:      0,
+        tokenCount: 0,
     }
 }
 
@@ -57,6 +69,7 @@ func (cm *ChatManager) Start() {
 	utils.Logger.Debug().Msg(fmt.Sprintf("Starting ChatManager with agents: %d", len(cm.agents)))
 
     go func() {
+        
 		for {
 			msg := <-cm.input
 			utils.Logger.Debug().
@@ -74,14 +87,57 @@ func (cm *ChatManager) Start() {
 
 			// Loop: keep routing until output is final
 			for {
+
+                // --- Limit enforcement ---
+                if cm.turns >= cm.maxTurns {
+					utils.Logger.Warn().
+						Msgf("[ChatManager] Cycle limit reached (%d turns) - halting conversation.", cm.maxTurns)
+					cm.output <- model.Message{
+						Sender:  "Manager",
+						Content: fmt.Sprintf("Conversation stopped: maximum of %d turns reached.", cm.maxTurns),
+					}
+					break
+				}
+				if cm.tokenCount >= cm.maxTokens {
+					utils.Logger.Warn().
+						Msgf("[ChatManager] Token limit reached (%d tokens) - halting conversation.", cm.maxTokens)
+					cm.output <- model.Message{
+						Sender:  "Manager",
+						Content: fmt.Sprintf("Conversation stopped: maximum of %d tokens used.", cm.maxTokens),
+					}
+					break
+				}
+
+				// --- Tally turn count and tokens if LLM usage is returned ---
+				cm.turns++
+				if resp.Tokens != nil {
+					cm.tokenCount += resp.Tokens.TotalTokens
+					utils.Logger.Debug().
+						Msgf("Token count updated: now at %d/%d tokens", cm.tokenCount, cm.maxTokens)
+				}
+
 				// --- Tool Call: Route to ToolRunner ---
 				if resp.MessageType == model.TypeToolCall && resp.ToolCall != nil {
 					toolAgent := ToolNameToAgent(resp.ToolCall.Name)
 					utils.Logger.Debug().
 						Str("tool", resp.ToolCall.Name).
 						Msgf("Routing tool call to agent %s", toolAgent)
+
 					if inChan, ok := cm.agentInputs[toolAgent]; ok {
-						inChan <- resp
+						toolMsg := resp
+                        // Set origin agent/content on tool call message
+                        if toolMsg.OriginAgent == "" { toolMsg.OriginAgent = resp.Sender }
+                        // Always store the *original* content if this is the first time
+                        if toolMsg.OriginContent == "" {
+                            // If Assistant was routed from Orchestrator, you may need to look one step back
+                            if len(cm.history) > 0 {
+                                // Use last content from history as best-effort
+                                toolMsg.OriginContent = cm.history[len(cm.history)-1].Content
+                            } else {
+                                toolMsg.OriginContent = resp.Content
+                            }
+                        }
+                        inChan <- toolMsg
 						resp = <-cm.agentOutputs[toolAgent]
 						continue // chain: check next response
 					} else {
@@ -92,6 +148,67 @@ func (cm *ChatManager) Start() {
 						break
 					}
 				}
+
+                // --- Tool Result with error: route back to origin agent for repair ---
+				if resp.MessageType == model.TypeToolResult && resp.IsError {
+                    targetAgent := resp.OriginAgent
+                    utils.Logger.Error().
+                        Str("target_agent", targetAgent).
+                        Msgf("ToolRunner returned error, routing back to original agent for fix.")
+
+                    // --- Compose structured error history ---
+                    var errorSummary string
+                    if resp.ErrorDetail != nil {
+                        errSection := fmt.Sprintf(`
+                [ERROR: Docker Exec - %s phase]
+                Command run:
+                %s
+
+                Output/Error:
+                %s
+
+                Internal error:
+                %s
+                `, resp.ErrorDetail.Phase, resp.ErrorDetail.Command, resp.ErrorDetail.Output, resp.ErrorDetail.ErrMsg)
+                        cm.errorHistory = append(cm.errorHistory, errSection)
+                    } else {
+                        cm.errorHistory = append(cm.errorHistory, resp.Content)
+                    }
+
+                    if len(cm.errorHistory) > 0 {
+                        errorSummary = "Previous execution errors:\n" + strings.Join(cm.errorHistory, "\n---\n") + "\n"
+                    } else {
+                        errorSummary = ""
+                    }
+
+                    newPrompt := fmt.Sprintf(
+                        `ERROR executing previous code.
+
+                %s
+                Original request: 
+                %s
+
+                Please fix the code and retry.`,
+                        errorSummary, resp.OriginContent,
+                    )
+
+                    fixMsg := model.Message{
+                        Sender:      "Manager",
+                        Content:     newPrompt,
+                        MessageType: model.TypeRoute,
+                        RouteTarget: targetAgent,
+                    }
+
+                    if inChan, ok := cm.agentInputs[targetAgent]; ok {
+                        inChan <- fixMsg
+                        resp = <-cm.agentOutputs[targetAgent]
+                        continue // chain: check next response
+                    } else {
+                        cm.output <- model.Message{Sender: "Manager", Content: "[ERROR] Could not find origin agent: " + targetAgent}
+                        break
+                    }
+                }
+
 				// --- Route as instructed to agent (could be Assistant, etc) ---
 				if resp.MessageType == model.TypeRoute {
 					agentName := resp.RouteTarget
@@ -110,6 +227,8 @@ func (cm *ChatManager) Start() {
 						break
 					}
 				}
+
+
 				// --- Otherwise, just forward output ---
 				utils.Logger.Debug().
 					Str("sender", resp.Sender).

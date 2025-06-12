@@ -18,13 +18,33 @@ type GenericMcpTool struct {
 
 func (t *GenericMcpTool) Name() string        { return t.NameStr }
 func (t *GenericMcpTool) Description() string { return t.DescriptionStr }
-func (t *GenericMcpTool) Parameters() map[string]string {
-    return map[string]string{
-        "path":   "API endpoint (e.g. /v1/customers)",
-        "method": "HTTP method (GET, POST, ...)",
-        "body":   "JSON body for POST/PUT requests (object or string, optional)",
+func (t *GenericMcpTool) Parameters() map[string]interface{} {
+    return map[string]interface{}{
+        "type": "object",
+        "properties": map[string]interface{}{
+            "path": map[string]interface{}{
+                "type":        "string",
+                "description": "API endpoint (e.g. /v1/customers)",
+            },
+            "method": map[string]interface{}{
+                "type":        "string",
+                "description": "HTTP method (GET, POST, ...)",
+            },
+            "body": map[string]interface{}{
+                "type":        "string",
+                "description": "JSON body for POST/PUT requests (object or string, optional)",
+            },
+        },
+        "required": []string{"path", "method"},
     }
 }
+// func (t *GenericMcpTool) Parameters() map[string]string {
+//     return map[string]string{
+//         "path":   "API endpoint (e.g. /v1/customers)",
+//         "method": "HTTP method (GET, POST, ...)",
+//         "body":   "JSON body for POST/PUT requests (object or string, optional)",
+//     }
+// }
 
 func (t *GenericMcpTool) Call(ctx context.Context, call ToolCall) ToolResult {
     path, _ := call.Args["path"].(string)
