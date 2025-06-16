@@ -11,6 +11,7 @@ import (
 
 type ToolRunnerAgent struct {
 	name     string
+	description string
 	registry *tools.ToolRegistry
 	dockerExecTool * tools.DockerExecTool
 }
@@ -19,6 +20,10 @@ func NewToolRunnerAgent(name string, registry *tools.ToolRegistry) *ToolRunnerAg
 	return &ToolRunnerAgent{name: name, registry: registry}
 }
 func (a *ToolRunnerAgent) Name() string { return a.name }
+func (a *ToolRunnerAgent) Description() string { return a.description }
+func (a *ToolRunnerAgent) SetDescription(desc string) {
+	a.description = desc
+}
 func (a *ToolRunnerAgent) CleanupContainer(ctx context.Context) error {
     if a.dockerExecTool != nil {
         utils.Logger.Info().Str("agent", a.name).Msg("Cleaning up DockerExecTool container")
@@ -36,6 +41,12 @@ func (a *ToolRunnerAgent) Start(input <-chan model.Message, output chan<- model.
 				Str("agent", a.name).
 				Str("event", "received_message").
 				Msgf("Received: %s", msg.Content)
+			utils.LogContext(msg.Context, "ToolRunner received context") // [ADDED]
+           
+			ctx := msg.Context
+			if ctx == nil {
+				ctx = map[string]interface{}{}
+			}
 				
 			if msg.MessageType == model.TypeToolCall && msg.ToolCall != nil {
 				result := a.registry.Call(context.TODO(), *msg.ToolCall)
@@ -53,6 +64,7 @@ func (a *ToolRunnerAgent) Start(input <-chan model.Message, output chan<- model.
 					Error: result.Error,
 					OriginAgent:   msg.OriginAgent,    // <---- PRESERVE!
 					OriginContent: msg.OriginContent,  // <---- PRESERVE!
+					Context:       ctx, // Pass-through context
 				}
 			} else {
 				utils.Logger.Warn().

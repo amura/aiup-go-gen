@@ -30,4 +30,5 @@ type Message struct {
     OriginAgent    string // Who initiated this request
     OriginContent  string // What was the original subtask/request
     Tokens *openai.Usage // For LLM responses, if applicable
+    Context       map[string]interface{} // <-- AGENT-AGNOSTIC CONTEXT
 }

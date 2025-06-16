@@ -3,8 +3,10 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/model"
@@ -76,6 +78,8 @@ func (cm *ChatManager) Start() {
 			utils.Logger.Debug().
 				Str("sender", msg.Sender).
 				Msgf("Manager received message: %s, now routing to [Orchestrator]", msg.Content)
+			utils.LogContext(msg.Context, "Manager received context") 
+            
 			metrics.AgentMessagesTotal.WithLabelValues("Manager").Inc()
 			cm.history = append(cm.history, msg)
 			
@@ -85,6 +89,9 @@ func (cm *ChatManager) Start() {
 			utils.Logger.Debug().
 				Str("sender", resp.Sender).
 				Msgf("Manager received response: %s", resp.Content)
+
+			utils.LogContext(resp.Context, "Manager received response context") // [ADDED]
+
 
 			// Loop: keep routing until output is final
 			for {
@@ -138,6 +145,9 @@ func (cm *ChatManager) Start() {
                                 toolMsg.OriginContent = resp.Content
                             }
                         }
+						toolMsg.Context = resp.Context // AGENT-AGNOSTIC CONTEXT FORWARD
+						utils.LogContext(toolMsg.Context, fmt.Sprintf("Routing tool call to %s", toolAgent)) // [ADDED]
+                        
                         inChan <- toolMsg
 						resp = <-cm.agentOutputs[toolAgent]
 						continue // chain: check next response
@@ -160,46 +170,64 @@ func (cm *ChatManager) Start() {
                     // --- Compose structured error history ---
                     var errorSummary string
                     if resp.ErrorDetail != nil {
-                        errSection := fmt.Sprintf(`
-                [ERROR: Docker Exec - %s phase]
-                Command run:
-                %s
+						errSection := fmt.Sprintf(`
+							Time: %s
+							------------------------------
+							[ERROR: Docker Exec - %s phase]
+							Command run:
+							%s
 
-                Output/Error:
-                %s
+							Output/Error:
+							%s
 
-                Internal error:
-                %s
-                `, resp.ErrorDetail.Phase, resp.ErrorDetail.Command, resp.ErrorDetail.Output, resp.ErrorDetail.ErrMsg)
-                        cm.errorHistory = append(cm.errorHistory, errSection)
-                    } else {
-                        cm.errorHistory = append(cm.errorHistory, resp.Content)
-                    }
+							Internal error:
+							%s
+							`, time.Now().Format(time.RFC3339), resp.ErrorDetail.Phase, resp.ErrorDetail.Command, 
+							resp.ErrorDetail.Output, resp.ErrorDetail.ErrMsg)
+							
 
-                    if len(cm.errorHistory) > 0 {
-                        errorSummary = "Previous execution errors:\n" + strings.Join(cm.errorHistory, "\n---\n") + "\n"
-                    } else {
-                        errorSummary = ""
-                    }
+						cm.errorHistory = append(cm.errorHistory, errSection)
+						} else {
+							cm.errorHistory = append(cm.errorHistory, resp.Content)
+						}
 
-                    newPrompt := fmt.Sprintf(
-                        `ERROR executing previous code.
+						if len(cm.errorHistory) > 0 {
+							errorSummary = "Previous execution errors:\n" + strings.Join(cm.errorHistory, "\n---\n") + "\n"
+						} else {
+							errorSummary = ""
+						}
 
-                %s
-                Original request: 
-                %s
+							// --- AGENT-AGNOSTIC CONTEXT: always included in prompt ---
+						var contextSection string
+						if resp.Context != nil && len(resp.Context) > 0 {
+							contextBytes, _ := json.MarshalIndent(resp.Context, "", "  ")
+							contextSection = "\n\n[Relevant Context Passed Down]:\n" + string(contextBytes)
+						} else {
+							contextSection = ""
+						}
 
-                Please fix the code and retry.`,
-                        errorSummary, resp.OriginContent,
-                    )
+						newPrompt := fmt.Sprintf(
+`ERROR executing previous code.
+
+%s
+%s
+
+Original request: 
+%s
+
+Please fix the code and retry.`,
+						errorSummary, contextSection, resp.OriginContent,
+					)
 
                     fixMsg := model.Message{
                         Sender:      "Manager",
                         Content:     newPrompt,
                         MessageType: model.TypeRoute,
                         RouteTarget: targetAgent,
+						Context:     resp.Context,
                     }
-
+					utils.LogContext(fixMsg.Context, "Routing tool error fix to agent") // [ADDED]
+                    
                     if inChan, ok := cm.agentInputs[targetAgent]; ok {
                         inChan <- fixMsg
                         resp = <-cm.agentOutputs[targetAgent]
@@ -217,8 +245,11 @@ func (cm *ChatManager) Start() {
 						Str("task", resp.Content).
 						Msgf("Routing task to agent %s", agentName)
 					if inChan, ok := cm.agentInputs[agentName]; ok {
-						inChan <- resp
-						resp = <-cm.agentOutputs[agentName]
+						forward := resp
+                        forward.Context = mergeContext(forward.Context, resp.Context)
+                        utils.LogContext(forward.Context, fmt.Sprintf("Routing as instructed to %s", agentName)) // [ADDED]
+                        inChan <- forward
+                        resp = <-cm.agentOutputs[agentName]
 						continue // chain: check next response
 					} else {
 						utils.Logger.Error().
@@ -229,16 +260,55 @@ func (cm *ChatManager) Start() {
 					}
 				}
 
+				// At the very end of your for loop (inside manager loop)
+				if resp.Sender != "Orchestrator" {
+					fwd := resp
+                    fwd.Context = mergeContext(fwd.Context, resp.Context)
+                    utils.LogContext(fwd.Context, "Rerouting normal output to Orchestrator") // [ADDED]
+                    cm.agentInputs["Orchestrator"] <- fwd
+                    resp = <-cm.agentOutputs["Orchestrator"]
+				} else {
+					utils.Logger.Debug().
+						Str("sender", resp.Sender).
+						Msgf("Final output: %s", resp.Content)
+						
+					utils.LogContext(resp.Context, "Final output from Orchestrator") // [ADDED]
+                   
+					cm.output <- resp
+					break // only emit to user if from orchestrator
+				}
 
-				// --- Otherwise, just forward output ---
-				utils.Logger.Debug().
-					Str("sender", resp.Sender).
-					Msgf("Final output from agent: %s", resp.Content)
-				cm.output <- resp
-				break
+
+				// // --- Otherwise, just forward output ---
+				// utils.Logger.Debug().
+				// 	Str("sender", resp.Sender).
+				// 	Msgf("Final output from agent: %s", resp.Content)
+				// cm.output <- resp
+				// break
 			}
 		}
 	}()
+}
+
+// [ADDED]: Merge context with right taking precedence
+func mergeContext(left, right map[string]interface{}) map[string]interface{} {
+    if left == nil && right == nil { return map[string]interface{}{} }
+    merged := make(map[string]interface{})
+    for k, v := range left { merged[k] = v }
+    for k, v := range right { merged[k] = v }
+    return merged
+}
+func getStringSlice(v interface{}) []string {
+    if v == nil { return nil }
+    if s, ok := v.([]string); ok { return s }
+    if s, ok := v.([]interface{}); ok {
+        var out []string
+        for _, v2 := range s {
+            if str, ok := v2.(string); ok { out = append(out, str) }
+        }
+        return out
+    }
+    return nil
 }
 
 // func (cm *ChatManager) Send(msg model.Message) {
