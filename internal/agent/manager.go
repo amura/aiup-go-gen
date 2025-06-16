@@ -31,6 +31,7 @@ type ChatManager struct {
 	maxTokens   int // e.g. 20000
     dockerContainerPrefix string
     errorHistory []string
+	ToolRunner *ToolRunnerAgent
 }
 
 func NewChatManager(agentList []Agent) *ChatManager {

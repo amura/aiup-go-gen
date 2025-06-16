@@ -114,7 +114,17 @@ func main() {
     orchestrator := agent.NewOrchestratorAgent("Orchestrator", manager, agents, llmClient)
     agentListWithOrch := append([]agent.Agent{orchestrator}, agents...)
     manager = agent.NewChatManager(agentListWithOrch)
+	manager.ToolRunner = toolRunner
     orchestrator.SetManager(manager) // set after to avoid nil ref
+
+	defer func() {
+    if manager.ToolRunner != nil {
+        utils.Logger.Info().Msg("Cleaning up Docker containers before exit.")
+        if err := manager.ToolRunner.Cleanup(context.TODO()); err != nil {
+            utils.Logger.Warn().Err(err).Msg("Failed to cleanup Docker container(s)")
+        }
+    }
+}()
 
 
 	// // check if hitlAgent is enabled via if check append(agents, hitlAgent)...
@@ -138,6 +148,8 @@ func main() {
 		fmt.Printf("*** [%s]: %s ***\n", msg.Sender, msg.Content)
 		// add termination condition to avoid endless loop
 	}
+
+
 
     // for {
     //     msg := <-manager.OutputChan()

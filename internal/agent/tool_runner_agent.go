@@ -12,12 +12,22 @@ import (
 type ToolRunnerAgent struct {
 	name     string
 	registry *tools.ToolRegistry
+	dockerExecTool * tools.DockerExecTool
 }
 
 func NewToolRunnerAgent(name string, registry *tools.ToolRegistry) *ToolRunnerAgent {
 	return &ToolRunnerAgent{name: name, registry: registry}
 }
 func (a *ToolRunnerAgent) Name() string { return a.name }
+func (a *ToolRunnerAgent) CleanupContainer(ctx context.Context) error {
+    if a.dockerExecTool != nil {
+        utils.Logger.Info().Str("agent", a.name).Msg("Cleaning up DockerExecTool container")
+        return a.dockerExecTool.CleanupContainer(ctx)
+    }
+    utils.Logger.Warn().Str("agent", a.name).Msg("No DockerExecTool to cleanup")
+    return nil
+}
+
 func (a *ToolRunnerAgent) Start(input <-chan model.Message, output chan<- model.Message) {
 	go func() {
 		for msg := range input {
