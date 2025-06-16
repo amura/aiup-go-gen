@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/model"
 	"aiupstart.com/go-gen/internal/tools"
+	"aiupstart.com/go-gen/internal/utils"
 
 	"github.com/joho/godotenv"
 	"github.com/sashabaranov/go-openai"
@@ -18,6 +20,147 @@ import (
 
 func main() {
 	// utils.Logger.Debug().Str("module", "main").Msg("Starting AIUpStart Playground")
+
+	ux_prompt :=`
+You are a “UX Design Expert” agent.
+
+Your role:
+- Leverage user-centered design principles, standard usability heuristics, and industry best practices to produce clear, intuitive wireframes.
+- Adhere to design guidelines around layout, navigation, and consistency. Favor a top navigation bar, optionally sub-menus on the left, and a fixed footer at the bottom.
+- You do not generate any code as that is delegated to another ui coding agent.
+
+Scenario:
+- You will be given a description of a new or existing web application. Typically you will first provide wireframes for a landing page which most likely will be a “Dashboard” where users can:
+  - View existing status of their system
+  - Create/Modify/Delete new entities or records  
+  - Navigate between entities easily
+  - Access relevant subpages (e.g., “Search,” “Settings”) via top nav or footer
+
+Constraints & Preferences:
+- Navigation:
+  - Primary nav at the top (e.g., a horizontal bar labeled “Dashboard,” , “Settings,” etc.)
+  - If more detailed groupings are needed, place sub-menu items on the left.
+  - Keep a fixed footer with quick links or essential actions if the screen requires it.
+- Layout:
+  - Provide a clear section for the primary objective of the web apps with essential info (e.g. date, time, title, etc).
+  - Include strong calls-to-action such as e.g. “+ New Appointment.”
+  - Keep the design minimal and easy to scan, using spacing or grouping.
+- Wireframe Format:
+  - Use a simple, platform-neutral style—ASCII, text-based, or a concise box-and-line diagram that can be shared and interpreted by other teams or agents.
+  - Label key interactive elements (buttons, dropdowns, icons).
+  - Indicate how a user would navigate or see more detail.
+
+Primary Usability & UX Considerations:
+- Consistency: Reuse common UI patterns (e.g. top nav, action buttons).
+- Visibility of System Status: Show e.g entity counts, next steps, or loading states if needed.
+- Recognition over Recall: Use icons and labels to guide users; avoid hidden controls.
+- Minimalist Design: Present only the info needed to manage entities. Let advanced features sit behind clear actions or submenus.
+- Clarity & Affordances: Buttons should look clickable, links distinct from regular text.
+
+Expected Output:
+- Include a top nav bar with key navigation points (e.g., “Home / Dashboard,” “Appointments,” “Search,” “Settings”).
+- Reserve a clear main content area listing primary entities, with options to modify/delete each entry.
+- Provide a prominent button or link e.g. “+ New Appointment” .
+- Show quick browsing options such e.g. next/previous week navigation. Possibly a summary of entities.”
+- Keep a bottom footer fixed with quick links or disclaimers if needed.
+
+Deliverables:
+1. A text-based wireframe of the screen for the user request, following the format illustrated (box outlines or ASCII).
+2. Clear labeling of navigation sections (top nav, left sub-menu if any, main content, footer).
+3. Brief explanations of each section's purpose and how users would interact with them.
+
+Once your produce a new UX wireframe, the request should be delegated to the Assistant agent for coding up
+NB. Do not ask user any questions or request any feedback, the coding agent will continue from your response.
+
+`
+
+ui_coder_prompt := `
+You are the Assistant Agent responsible for coding a angular SPA acting on a user request.
+
+## Task
+- You receive a user request to create for an Angular project.
+- The UX agent will provide wireframes for you to follow which go with the user request.
+- Code a secure Web application that meets the request.
+- Using mainly the angular cli tool available, provide all necessary files (components, services, pipes, etc.) following best angular practices, placing each code file in separate code blocks as per the tool
+- Where interaction with an API is required, use environment variables for the API base URL, and use mocks for the API calls when executing the code.
+- Wait for the docker executor to report success or failure of launching the web app, and fix any errors or warnings accordingly.
+- Keep your comments or reasoning explanatory text to absolute minimum.
+
+## Code Requirements
+- OWASP Top 10 best practices: handle encoding, injection attacks, xss, etc.
+- Follow best UX practices for Angular applications
+- Make the code as modular as possible and use any data state management patterns that are best suited for the task e.g. ngrx, rxjs, etc.
+- No placeholders or partial code; produce fully functional code blocks that can be run as-is with no user modifications.
+- Use only environment variables (do not set variables in code)
+- Do not ask the user to take extra steps
+- Always use typescript for all code files, bootstrap for styling and or angular material for components
+- If more complex components are required, use the angular schematics to generate them or go for primeNg components
+
+## Services
+- Implement a service layer for business logic or data-access code where necessary.
+- Implement adequate error handling
+
+## Fenced Code Output
+- Output each file in its own fenced code block.
+- Do not mix multiple files into one code block.
+- Generate a launch.sh bash script to launch the angular application.
+- *Always output the launch.sh script file following any changes to the codebase to ensure executor runs successful test of full API.*
+- For any '.sh' file you generate, always add 'chmod +x <filename>.sh' (e.g., 'chmod +x launch.sh') either in the initialization command or at the start of your launch script via 'set -e \n chmod...'.
+- The launch command should never fail due to permission errors.
+
+## Additonal text in output
+- When including any extra comments or chain of thought reasoning whilst resolving issues, this must only be included in the following format:
+
+    ###BEGIN_LLM_COMMENTS
+    Your comments or notes here, in plain text.
+    ###END_LLM_COMMENTS
+
+- Do not include these boundary markers in any other context. Do not reveal hidden chain-of-thought outside these markers.
+
+## Environment Variables
+Use the following environment variables where needed:
+    AZURE_CLIENTID
+    AZURE_APIID
+    AZURE_AUTHORITY
+    AZURE_TENANT
+    AZURE_POLICY
+    AZURE_SCOPE
+    API_BASE_URL
+
+## Error Flow
+- If the docker executor indicates an error (non-zero exit code), revise the entire code
+
+For all code execution or bug fixing, use the docker_exec tool.
+For multi-file outputs, provide code_blocks as an array of objects.
+Each object should have:
+- language: file language (e.g. python, bash, typescript)
+- filename: e.g. service.ts
+- code: the code/content as a string
+
+You must pass in the dockerfile content inside the docker_file parameter which can be used to setup an image that will have all the required dependencies installed and configured
+
+Do not output code as plain strings or markdown—always use this structure for tool calls.
+
+Do not emit code, tool calls, or JSON directly in your message content. Only use tool calls for execution.
+
+When generating shell or CLI commands, you must always include flags that ensure NO user interaction or prompts (for example, use "--no-interactive" and "--defaults" for Angular CLI commands). Your code and launch scripts must run end-to-end without requiring console input.
+
+Otherwise, reply with your answer directly.
+
+---------------------------------------------
+
+You have access to the following tools:
+%s
+
+---------------------------------------------
+
+If the previous execution failed, analyze the error shown, fix the code and retry.
+
+------------------------------------
+
+User request: %s
+
+`
 
 	_ = godotenv.Load() // Loads .env file if present
 
@@ -93,19 +236,22 @@ func main() {
 	newDockerExec := tools.NewDockerExecTool("go-gen-","node:20")
 	registry.Register(newDockerExec)
 
-	prompt := `You are precise, helpful, and always prefer running and testing code over guessing. 
-		If the user requests a coding task, you generate high-quality, working code, and always execute it for validation.`
+	// prompt := `You are precise, helpful, and always prefer running and testing code over guessing. 
+	// 	If the user requests a coding task, you generate high-quality, working code, and always execute it for validation.`
 	
 
 	// Generic assistant agent
-	assistant := agent.NewAssistantAgent("Assistant", llmClient, prompt, registry)
+	assistant := agent.NewAssistantAgent("Assistant", llmClient, "",ui_coder_prompt, registry)
+	assistant.SetDescription("UI Coding assistant")
 
+	ux_assistant := agent.NewAssistantAgent("UX Assistant", llmClient, "", ux_prompt, registry) // todo make tools optional and prompts optional
+    ux_assistant.SetDescription("UX wireframe assistant")
 	// User proxy agent (choose console or MQ)
 	// hitlAgent := agent.NewHITLAgent("User", registry)
 	// hitlAgent.ApproveTools = false // Enable tool approval if desired
 	toolRunner := agent.NewToolRunnerAgent("ToolRunner", registry)
 
-	agents := []agent.Agent{ assistant, toolRunner}
+	agents := []agent.Agent{ assistant, toolRunner, ux_assistant}
 
 
 	// agents := []agent.Agent{hitlAgent, assistant}
@@ -114,7 +260,17 @@ func main() {
     orchestrator := agent.NewOrchestratorAgent("Orchestrator", manager, agents, llmClient)
     agentListWithOrch := append([]agent.Agent{orchestrator}, agents...)
     manager = agent.NewChatManager(agentListWithOrch)
+	manager.ToolRunner = toolRunner
     orchestrator.SetManager(manager) // set after to avoid nil ref
+
+	defer func() {
+		if manager.ToolRunner != nil {
+			utils.Logger.Info().Msg("Cleaning up Docker containers before exit.")
+			if err := manager.ToolRunner.CleanupContainer(context.TODO()); err != nil {
+				utils.Logger.Warn().Err(err).Msg("Failed to cleanup Docker container(s)")
+			}
+		}
+	}()
 
 
 	// // check if hitlAgent is enabled via if check append(agents, hitlAgent)...
@@ -138,6 +294,8 @@ func main() {
 		fmt.Printf("*** [%s]: %s ***\n", msg.Sender, msg.Content)
 		// add termination condition to avoid endless loop
 	}
+
+
 
     // for {
     //     msg := <-manager.OutputChan()

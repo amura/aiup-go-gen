@@ -90,7 +90,7 @@ mcp_tools:
             description: Optional initialization script or command.
           launch:
             type: string
-            description: Optional launch command or shell script to execute.
+            description: Optional launch command e.g. ng serve, dotnet run or shell script to execute such as launch.sh (ensure chmod +x).
           timeout:
             type: number
             description: The max timeout in seconds for which either launch or init commands should be executed before termination. Avoids waiting for ever.
@@ -100,3 +100,27 @@ mcp_tools:
         required:
           - language
           - code_blocks
+# - name: search_mcp
+#   endpoint: http://localhost:8081  # The port you mapped the MCP search server to
+#   description: >
+#     Use this tool to perform a live internet search (Google, Bing, or other engines).
+#     Returns search results with title, snippet, and URL.
+#   operations:
+#     - name: search
+#       path: /search
+#       method: GET
+#       description: Search the internet for the given query.
+#       example_args:
+#         query: "Go generative agent frameworks"
+#         max_results: 3
+#       parameters:
+#         type: object
+#         properties:
+#           query:
+#             type: string
+#             description: The search query.
+#           max_results:
+#             type: integer
+#             description: Maximum results to return.
+#         required:
+#           - query
