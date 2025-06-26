@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,18 +11,20 @@ import (
 	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/model"
 	"aiupstart.com/go-gen/internal/tools"
-	"aiupstart.com/go-gen/internal/utils"
 
 	"github.com/joho/godotenv"
-	"github.com/sashabaranov/go-openai"
+)
+
+const (
+    RoleAssistant = "assistant"
+    RoleUx = "ux"
+    // ...
 )
 
 func main() {
 	// utils.Logger.Debug().Str("module", "main").Msg("Starting AIUpStart Playground")
 
 	ux_prompt :=`
-You are a “UX Design Expert” agent.
-
 Your role:
 - Leverage user-centered design principles, standard usability heuristics, and industry best practices to produce clear, intuitive wireframes.
 - Adhere to design guidelines around layout, navigation, and consistency. Favor a top navigation bar, optionally sub-menus on the left, and a fixed footer at the bottom.
@@ -75,7 +76,6 @@ NB. Do not ask user any questions or request any feedback, the coding agent will
 `
 
 ui_coder_prompt := `
-You are the Assistant Agent responsible for coding a angular SPA acting on a user request.
 
 ## Task
 - You receive a user request to create for an Angular project.
@@ -85,6 +85,7 @@ You are the Assistant Agent responsible for coding a angular SPA acting on a use
 - Where interaction with an API is required, use environment variables for the API base URL, and use mocks for the API calls when executing the code.
 - Wait for the docker executor to report success or failure of launching the web app, and fix any errors or warnings accordingly.
 - Keep your comments or reasoning explanatory text to absolute minimum.
+- You must attempt to launch the web app once it has built using ng serve, and report any errors or warnings to the user.
 
 ## Code Requirements
 - OWASP Top 10 best practices: handle encoding, injection attacks, xss, etc.
@@ -147,19 +148,6 @@ When generating shell or CLI commands, you must always include flags that ensure
 
 Otherwise, reply with your answer directly.
 
----------------------------------------------
-
-You have access to the following tools:
-%s
-
----------------------------------------------
-
-If the previous execution failed, analyze the error shown, fix the code and retry.
-
-------------------------------------
-
-User request: %s
-
 `
 
 	_ = godotenv.Load() // Loads .env file if present
@@ -172,27 +160,17 @@ User request: %s
 
 	metrics.StartMetricsServer(":2112")
 
-	
-	// Logger to file as well as stdout
-	// f, _ := os.OpenFile("run.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	// utils.Logger.SetOutput(f)
-
-	// Tool config (optional)
-	cfg, _ := tools.LoadToolConfig("./tools.yaml")
+	// cfg, _ := tools.LoadToolConfig("./tools.yaml")
 
 	pwd, err := os.Getwd()
 	if err != nil {
 		panic(err)
 	}
 	mcpCfgPath := filepath.Join(filepath.Dir(pwd), "mcp_tools.yaml")
-	// utils.Logger.Debug().Str("module", "main").Msgf("Starting AIUpStart Playground with file %s", mcpCfgPath)
-
 	mcp_cfg, err := config.LoadConfig(mcpCfgPath)
-	if err != nil { panic(err) }
-
-// 	if err := config.ValidateMcpConfig(cfg); err != nil {
-//     log.Fatalf("Config validation error: %v", err)
-// }
+	if err != nil {
+		panic(err)
+	}
 
 	registry := tools.NewToolRegistry()
 
@@ -205,157 +183,74 @@ User request: %s
 		registry.Register(tool)
 	}
 
-	// OpenAI Example
-	// 
-	// llmClient := llm.NewOpenAIClient(apiKey, "gpt-4o", mcp_cfg)
-
-	oaClient := openai.NewClient(apiKey)
+	// --- OpenAI client and tools ---
+	// oaClient := openai.NewClient(apiKey)
 	openAITools := llm.BuildOpenAIToolsFromConfig(mcp_cfg)
-	  // --- 4. Wrap OpenAI client in your LLM interface ---
-	  llmClient := llm.NewOpenAILLMClient(oaClient, openAITools)
-
-	//   // --- 5. Build ToolRegistry for runtime tool calls ---
-	//   registry := tools.NewToolRegistry()
-	//   for _, mcp := range cfg.McpTools {
-	// 	  for _, op := range mcp.Operations {
-	// 		  registry.Register(&tools.GenericMcpTool{
-	// 			  NameStr:        op.Name,
-	// 			  Endpoint:       mcp.Endpoint,
-	// 			  DescriptionStr: op.Description,
-	// 			  // Optionally: add validation fields for runtime here
-	// 		  })
-	// 	  }
-	//   }
-
-
+	llmClient := llm.NewOpenAILLMClient(apiKey,"gpt-4o", openAITools)
 
 	// Register tools only if enabled
-	if cfg == nil || toolEnabled(cfg, "fetch_arxiv") {
-		registry.Register(&tools.FetchArxivTool{})
-	}
-	newDockerExec := tools.NewDockerExecTool("go-gen-","node:20")
+	// if cfg == nil || toolEnabled(cfg, "fetch_arxiv") {
+	// 	registry.Register(&tools.FetchArxivTool{})
+	// }
+
+	newDockerExec := tools.NewDockerExecTool("go-gen-", "angular-dev:latest")
 	registry.Register(newDockerExec)
 
-	// prompt := `You are precise, helpful, and always prefer running and testing code over guessing. 
-	// 	If the user requests a coding task, you generate high-quality, working code, and always execute it for validation.`
-	
+	// Put your actual prompt strings here, or load from file/config.
+	// ui_coder_prompt := "You are a coding agent. ..." // <--- put your actual UI coder prompt here
+	// ux_prompt := "You are a UX agent. ..."          // <--- put your actual UX agent prompt here
 
-	// Generic assistant agent
-	assistant := agent.NewAssistantAgent("Assistant", llmClient, "",ui_coder_prompt, registry)
+	// --- Agents ---
+	assistant := agent.NewAssistantAgent("assistant", RoleAssistant, llmClient, "You are the Assistant Agent responsible for coding a angular SPA acting on a user request", ui_coder_prompt, registry)
 	assistant.SetDescription("UI Coding assistant")
 
-	ux_assistant := agent.NewAssistantAgent("UX Assistant", llmClient, "", ux_prompt, registry) // todo make tools optional and prompts optional
-    ux_assistant.SetDescription("UX wireframe assistant")
-	// User proxy agent (choose console or MQ)
-	// hitlAgent := agent.NewHITLAgent("User", registry)
-	// hitlAgent.ApproveTools = false // Enable tool approval if desired
-	toolRunner := agent.NewToolRunnerAgent("ToolRunner", registry)
+	ux_assistant := agent.NewAssistantAgent("ux", RoleUx, llmClient, "You are an experienced 'UX Design Expert' agent.", ux_prompt, nil)
+	ux_assistant.SetDescription("UX wireframe assistant")
 
-	agents := []agent.Agent{ assistant, toolRunner, ux_assistant}
+	toolRunner := agent.NewToolRunnerAgent("toolrunner", registry)
+	agents := []agent.Agent{assistant, toolRunner, ux_assistant}
 
-
-	// agents := []agent.Agent{hitlAgent, assistant}
-
+	// --- Orchestrator/Manager setup ---
+	workflow := map[string]string{
+    "user": "ux",
+    "ux": "assistant",
+    "assistant": "tool",
+    "tool": "assistant",
+}
 	var manager *agent.ChatManager
-    orchestrator := agent.NewOrchestratorAgent("Orchestrator", manager, agents, llmClient)
-    agentListWithOrch := append([]agent.Agent{orchestrator}, agents...)
-    manager = agent.NewChatManager(agentListWithOrch)
-	manager.ToolRunner = toolRunner
-    orchestrator.SetManager(manager) // set after to avoid nil ref
+	orchestrator := agent.NewOrchestratorAgent("Orchestrator", manager, agents, llmClient, workflow)
+	agentListWithOrch := append([]agent.Agent{orchestrator}, agents...)
+	manager = agent.NewChatManager(agentListWithOrch)
+	orchestrator.SetManager(manager)
 
+	// Ensure cleanup of docker containers on exit
 	defer func() {
-		if manager.ToolRunner != nil {
-			utils.Logger.Info().Msg("Cleaning up Docker containers before exit.")
-			if err := manager.ToolRunner.CleanupContainer(context.TODO()); err != nil {
-				utils.Logger.Warn().Err(err).Msg("Failed to cleanup Docker container(s)")
-			}
-		}
+		// if manager.ToolRunner != nil {
+		// 	utils.Logger.Info().Msg("Cleaning up Docker containers before exit.")
+		// 	if err := manager.ToolRunner.CleanupContainer(context.TODO()); err != nil {
+		// 		utils.Logger.Warn().Err(err).Msg("Failed to cleanup Docker container(s)")
+		// 	}
+		// }
 	}()
 
+	// --- Start the chat loop ---
+	first := model.AgentMessage{
+		Role:    model.RoleUser,
+		Sender:  "User",
+		Content: "Create a new angular web app which has a main user login page.",
+	}
+	manager.Start()
 
-	// // check if hitlAgent is enabled via if check append(agents, hitlAgent)...
-	// selector := chat.RoundRobinSelector() // or advanced selector
-
-	// orchestrator := agent.NewOrchestratorAgent("Orchestrator", agents, SimpleStrategy)
-	// topAgents := []agent.Agent{orchestrator}
-	
-	// manager := agent.NewChatManager(topAgents, chat.RoundRobinSelector())
-	// manager.Start()
-	
-    first := model.Message{Sender: "User", Content: "Create a new angular web app which has a main user login page."}
-    manager.Start()
-
-    go func() { manager.InputChan() <- first }()
-
-
-	// go hitlAgent.BeginChat(manager, first)
+	go func() { manager.InputChan() <- first }()
 
 	for msg := range manager.OutputChan() {
-		fmt.Printf("*** [%s]: %s ***\n", msg.Sender, msg.Content)
+		fmt.Printf("*** [%s][%s]: %s ***\n", msg.Role, msg.Sender, msg.Content)
 		// add termination condition to avoid endless loop
+		if msg.Role == model.RoleSystem && (msg.Content == "exit" || msg.Content == "done") {
+			fmt.Println("Exiting loop by system command.")
+			break
+		}
 	}
-
-
-
-    // for {
-    //     msg := <-manager.OutputChan()
-    //     fmt.Printf("[%s]: %s\n", msg.Sender, msg.Content)
-
-    //     turns++
-    //     if turns >= maxTurns {
-    //         fmt.Println("Max turns reached. Exiting.")
-    //         break
-    //     }
-    //     // Or terminate if an agent outputs an exit/done message
-    //     lower := strings.ToLower(msg.Content)
-    //     if strings.Contains(lower, "exit") || strings.Contains(lower, "done") {
-    //         fmt.Println("Termination cue detected. Exiting.")
-    //         break
-    //     }
-    //     // Autonomous: feed response back to manager.input for next agent
-    //     manager.InputChan() <- msg
-    // }
-	//   if cfg == nil || toolEnabled(cfg, "markdown_report") {
-	// 	  registry.Register(&tools.MarkdownReportTool{})
-	//   }
-
-	// llmClient := llm.NewOpenAIClient("sk-your-openai-key")
-	// planner := agent.NewPlanner("Planner", llmClient)
-	// researcher := agent.NewResearcher("Researcher", llmClient)
-	// // writer := agent.NewWriter("Writer", llmClient)
-
-	// manager := chat.NewChatManager([]agent.AssistantAgent{planner, researcher})
-	// manager.Start()
-
-	// Keep the main function alive
-	// select {}
-
-	// // Anthropic Example
-	// anthropicClient := aiup_go_gen.NewAnthropicClient("your-anthropic-api-key", "claude-3")
-	// response, err = anthropicClient.Generate("Hello, Claude!")
-	// if err != nil {
-	//     fmt.Println("Anthropic Error:", err)
-	// } else {
-	//     fmt.Println("Anthropic Response:", response)
-	// }
-
-	// // Meta Example
-	// metaClient := aiup_go_gen.NewMetaClient("your-meta-api-key", "llama-3", "https://api.nebius.ai/v1")
-	// response, err = metaClient.Generate("Hello, LLaMA!")
-	// if err != nil {
-	//     fmt.Println("Meta Error:", err)
-	// } else {
-	//     fmt.Println("Meta Response:", response)
-	// }
-
-	// // Grok Example
-	// grokClient := aiup_go_gen.NewGrokClient("your-grok-api-key", "grok-3", "https://api.grok.com/v1")
-	// response, err = grokClient.Generate("Hello, Grok!")
-	// if err != nil {
-	//     fmt.Println("Grok Error:", err)
-	// } else {
-	//     fmt.Println("Grok Response:", response)
-	// }
 }
 
 func toolEnabled(cfg *tools.ToolConfig, name string) bool {
@@ -367,33 +262,21 @@ func toolEnabled(cfg *tools.ToolConfig, name string) bool {
 	return false
 }
 
-func SimpleStrategy(msg model.Message, agents []agent.Agent) int {
-    // Route to Assistant if normal chat, to HITL if tool call, etc.
-    if msg.MessageType == model.TypeToolCall {
-        for i, a := range agents {
-            if a.Name() == "HITL" { return i }
-        }
-    }
-    // Default to assistant
-    for i, a := range agents {
-        if a.Name() == "Assistant" { return i }
-    }
-    return 0 // fallback
-// }
-
-// func BuildMcpPrompt(cfg *config.Config) string {
-//     s := "You have access to these MCP tools:\n"
-//     for _, t := range cfg.McpTools {
-//         s += fmt.Sprintf("\n%s: %s\n", t.Name, t.Description)
-//         s += "Supported operations:\n"
-//         for _, op := range t.Operations {
-//             s += fmt.Sprintf("- %s (%s %s): %s\n  Example: { \"tool\": \"%s\", \"args\": { \"path\": \"%s\", \"method\": \"%s\", \"body\": %v } }\n",
-//                 op.Name, op.Method, op.Path, op.Description, t.Name, op.Path, op.Method, op.ExampleArgs)
-//         }
-//     }
-//     s += "\nTo call a tool, always use this format:\n"
-//     s += "{ \"tool\": \"tool_name\", \"args\": { \"path\": \"...\", \"method\": \"...\", \"body\": {...} } }\n"
-//     s += "Do not use external APIs directly—always use these MCP tools.\n"
-//     return s
-// }
+// Optionally: update your agent strategy
+func SimpleStrategy(msg model.AgentMessage, agents []agent.Agent) int {
+	// Route to Assistant if normal chat, to HITL if tool call, etc.
+	if msg.Type == model.TypeToolCall {
+		for i, a := range agents {
+			if a.Name() == "HITL" {
+				return i
+			}
+		}
+	}
+	// Default to assistant
+	for i, a := range agents {
+		if a.Name() == "Assistant" {
+			return i
+		}
+	}
+	return 0 // fallback
 }

@@ -1,20 +1,31 @@
 package llm
 
-import openai "github.com/sashabaranov/go-openai"
+import (
+	"aiupstart.com/go-gen/internal/model"
+	openai "github.com/sashabaranov/go-openai"
+)
 
-
+// LLMToolCall and LLMResponse for structured outputs
 type LLMToolCall struct {
-    Name string
-    Args map[string]interface{}
+	Name string
+	Args map[string]interface{}
+	ID  string
 }
 
 type LLMResponse struct {
-    Content   string
-    ToolCalls []LLMToolCall
-    Tokens    *openai.Usage 
+	Content   string
+	ToolCalls []LLMToolCall
+	Tokens    *openai.Usage
 }
 
-// LLMClient defines the interface for interacting with different LLM providers.
+// LLMClient interface
 type LLMClient interface {
-	Generate(prompt string) ( LLMResponse , error)
+	Generate(history []model.AgentMessage, prompt string) (LLMResponse, error)
 }
+
+// // LLMClient defines the interface for all LLM backends.
+// type LLMClient interface {
+//     // The strict "role/content" model. Tools are configured at creation.
+//     Chat(messages []openai.ChatCompletionMessage) (LLMResponse, error)
+//     Generate(prompt string) (LLMResponse, error) // (for backwards compat)
+// }
