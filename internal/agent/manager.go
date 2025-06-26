@@ -1,12 +1,7 @@
-// internal/chat/manager.go
-// always starts flow with Orchestrator, then routes based on message type.
 package agent
 
 import (
-	"encoding/json"
-	"fmt"
-	"strings"
-	"time"
+	"sync"
 
 	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/model"
@@ -14,369 +9,153 @@ import (
 )
 
 type ChatManager struct {
-	// agents        []Agent
-
-	agents        map[string]Agent // agent name -> Agent
-    agentInputs   map[string]chan model.Message
-    agentOutputs  map[string]chan model.Message
-
-	// prompts       map[string]string
-	// selector      func(int,[]Agent, model.Message, []model.Message, interface{}) int
-	// lastAgentIdx  int
-	history       []model.Message
-	// context       map[string]interface{}
-	input, output chan model.Message
-    // for limiting the number of iterations
-    turns       int
-	tokenCount  int
-	maxTurns    int // e.g. 15
-	maxTokens   int // e.g. 20000
-    dockerContainerPrefix string
-    errorHistory []string
-	ToolRunner *ToolRunnerAgent
+	name         string
+	agents       map[string]Agent
+	agentInputs  map[string]chan model.AgentMessage
+	agentOutputs map[string]chan model.AgentMessage
+	history      []model.AgentMessage
+	mu           sync.Mutex
+	input        chan model.AgentMessage
+	output       chan model.AgentMessage
 }
 
-func NewChatManager(agentList []Agent) *ChatManager {
-    agents := make(map[string]Agent)
-    agentInputs := make(map[string]chan model.Message)
-    agentOutputs := make(map[string]chan model.Message)
-    for _, a := range agentList {
-        utils.Logger.Debug().Str("agent","chatmanager").Msgf("Registering agent: %s", a.Name())
-        agents[a.Name()] = a
-        agentInputs[a.Name()] = make(chan model.Message, 2)
-        agentOutputs[a.Name()] = make(chan model.Message, 2)
-        go a.Start(agentInputs[a.Name()], agentOutputs[a.Name()])
-    }
-    return &ChatManager{
-        agents:       agents,
-        agentInputs:  agentInputs,
-        agentOutputs: agentOutputs,
-        input:        make(chan model.Message, 4),
-        output:       make(chan model.Message, 4),
-        history:      []model.Message{},
-        maxTurns:   10,
-        maxTokens:  20000,
-        turns:      0,
-        tokenCount: 0,
-    }
+func NewChatManager(agents []Agent) *ChatManager {
+	cm := &ChatManager{
+		agents:       make(map[string]Agent),
+		agentInputs:  make(map[string]chan model.AgentMessage),
+		agentOutputs: make(map[string]chan model.AgentMessage),
+		history:      []model.AgentMessage{},
+		input:        make(chan model.AgentMessage, 8),
+		output:       make(chan model.AgentMessage, 8),
+	}
+	for _, a := range agents {
+		cm.agents[a.Name()] = a
+		cm.agentInputs[a.Name()] = make(chan model.AgentMessage, 2)
+		cm.agentOutputs[a.Name()] = make(chan model.AgentMessage, 2)
+		go a.Start(cm.agentInputs[a.Name()], cm.agentOutputs[a.Name()])
+	}
+	return cm
 }
 
-// Start initializes the ChatManager by setting up dedicated input and output channels
-// for each agent and launching their processing goroutines. It also starts a manager
-// goroutine that listens for incoming messages, updates the conversation history,
-// selects the next agent to handle the message using the selector strategy, forwards
-// the message to the chosen agent, receives the agent's response, updates the history,
-// and sends the response to the output channel. This enables concurrent, coordinated
-// communication between the manager and multiple agents.
-func (cm *ChatManager) Start() {
-	utils.Logger.Debug().Msg(fmt.Sprintf("Starting ChatManager with agents: %d", len(cm.agents)))
+func (m *ChatManager) Name() string        { return m.name }
+func (m *ChatManager) Description() string { return "ChatManager for agent coordination" }
+func (m *ChatManager) SetDescription(d string) {}
 
-    go func() {
-        
-		for {
-			msg := <-cm.input
-			utils.Logger.Debug().
-				Str("sender", msg.Sender).
-				Msgf("Manager received message: %s, now routing to [Orchestrator]", msg.Content)
-			utils.LogContext(msg.Context, "Manager received context") 
-            
-			metrics.AgentMessagesTotal.WithLabelValues("Manager").Inc()
-			cm.history = append(cm.history, msg)
-			
-			// Start by always sending to Orchestrator
-			cm.agentInputs["Orchestrator"] <- msg
-			resp := <-cm.agentOutputs["Orchestrator"]
-			utils.Logger.Debug().
-				Str("sender", resp.Sender).
-				Msgf("Manager received response: %s", resp.Content)
+func (m *ChatManager) RegisterAgent(agent Agent) {
+	m.agents[agent.Name()] = agent
+	inCh := make(chan model.AgentMessage, 16)
+	outCh := make(chan model.AgentMessage, 16)
+	m.agentInputs[agent.Name()] = inCh
+	m.agentOutputs[agent.Name()] = outCh
+	agent.Start(inCh, outCh)
+	utils.Logger.Debug().Str("agent", agent.Name()).Msg("Registered agent with manager")
+}
 
-			utils.LogContext(resp.Context, "Manager received response context") // [ADDED]
+func (m *ChatManager) SendToAgent(agentName string, msg model.AgentMessage) {
+	inCh, ok := m.agentInputs[agentName]
+	if ok {
+		inCh <- msg
+	} else {
+		utils.Logger.Warn().Str("agent", agentName).Msg("No input channel for agent")
+	}
+}
 
+func (m *ChatManager) InputChan() chan model.AgentMessage  { return m.input }
+func (m *ChatManager) OutputChan() chan model.AgentMessage { return m.output }
+func (m *ChatManager) AgentInputChan(agentName string) chan model.AgentMessage  { return m.agentInputs[agentName] }
+func (m *ChatManager) AgentOutputChan(agentName string) chan model.AgentMessage { return m.agentOutputs[agentName] }
 
-			// Loop: keep routing until output is final
-			for {
+func (m *ChatManager) Start() {
+	go func() {
+		for msg := range m.input {
+            metrics.AgentMessagesTotal.WithLabelValues(m.Name()).Inc()
+            utils.Logger.Debug().Str("sender", msg.OriginAgent).Msgf("Manager received message: %s", msg.Content)
+            m.appendHistory(msg)
 
-                // --- Limit enforcement ---
-                if cm.turns >= cm.maxTurns {
-					utils.Logger.Warn().
-						Msgf("[ChatManager] Cycle limit reached (%d turns) - halting conversation.", cm.maxTurns)
-					cm.output <- model.Message{
-						Sender:  "Manager",
-						Content: fmt.Sprintf("Conversation stopped: maximum of %d turns reached.", cm.maxTurns),
-					}
-					break
-				}
-				if cm.tokenCount >= cm.maxTokens {
-					utils.Logger.Warn().
-						Msgf("[ChatManager] Token limit reached (%d tokens) - halting conversation.", cm.maxTokens)
-					cm.output <- model.Message{
-						Sender:  "Manager",
-						Content: fmt.Sprintf("Conversation stopped: maximum of %d tokens used.", cm.maxTokens),
-					}
-					break
-				}
+            var targetAgent string
 
-				// --- Tally turn count and tokens if LLM usage is returned ---
-				cm.turns++
-				if resp.Tokens != nil {
-					cm.tokenCount += resp.Tokens.TotalTokens
-					utils.Logger.Debug().
-						Msgf("Token count updated: now at %d/%d tokens", cm.tokenCount, cm.maxTokens)
-				}
+            if msg.RouteTarget != "" && msg.RouteTarget != m.Name() {
+                // If a route_target is specified, go directly there
+                targetAgent = msg.RouteTarget
+            } else if msg.Role == "user" {
+                // All user input first goes to orchestrator
+                targetAgent = "Orchestrator"
+            } else {
+                // Fallback: orchestrator decides
+                targetAgent = "Orchestrator"
+            }
 
-				// --- Tool Call: Route to ToolRunner ---
-				if resp.MessageType == model.TypeToolCall && resp.ToolCall != nil {
-					toolAgent := ToolNameToAgent(resp.ToolCall.Name)
-					utils.Logger.Debug().
-						Str("tool", resp.ToolCall.Name).
-						Msgf("Routing tool call to agent %s", toolAgent)
+            utils.Logger.Debug().Str("target", targetAgent).Msgf("---> Routing to %s", targetAgent)
+            m.SendToAgent(targetAgent, msg)
+            resp := <-m.AgentOutputChan(targetAgent)
+            preview := resp.Content
+            if len(preview) > 10 {
+                preview = preview[:min(50, len(preview))]
+            }
+            utils.Logger.Debug().Str("sender", resp.OriginAgent).Msgf("Manager received output response from %s: %s", targetAgent, preview)
+            m.appendHistory(resp)
 
-					if inChan, ok := cm.agentInputs[toolAgent]; ok {
-						toolMsg := resp
-                        // Set origin agent/content on tool call message
-                        if toolMsg.OriginAgent == "" { toolMsg.OriginAgent = resp.Sender }
-                        // Always store the *original* content if this is the first time
-                        if toolMsg.OriginContent == "" {
-                            // If Assistant was routed from Orchestrator, you may need to look one step back
-                            if len(cm.history) > 0 {
-                                // Use last content from history as best-effort
-                                toolMsg.OriginContent = cm.history[len(cm.history)-1].Content
-                            } else {
-                                toolMsg.OriginContent = resp.Content
-                            }
-                        }
-						toolMsg.Context = resp.Context // AGENT-AGNOSTIC CONTEXT FORWARD
-						utils.LogContext(toolMsg.Context, fmt.Sprintf("Routing tool call to %s", toolAgent)) // [ADDED]
-                        
-                        inChan <- toolMsg
-						resp = <-cm.agentOutputs[toolAgent]
-						continue // chain: check next response
-					} else {
-						utils.Logger.Error().
-							Str("tool", resp.ToolCall.Name).
-							Msgf("[ERROR] Unknown tool agent: %s", toolAgent)
-						cm.output <- model.Message{Sender: "Manager", Content: "[ERROR] Unknown tool agent: " + toolAgent}
-						break
-					}
-				}
-
-                // --- Tool Result with error: route back to origin agent for repair ---
-				if resp.MessageType == model.TypeToolResult && resp.IsError {
-                    targetAgent := resp.OriginAgent
-                    utils.Logger.Error().
-                        Str("target_agent", targetAgent).
-                        Msgf("ToolRunner returned error, routing back to original agent for fix.")
-
-                    // --- Compose structured error history ---
-                    var errorSummary string
-                    if resp.ErrorDetail != nil {
-						errSection := fmt.Sprintf(`
-							Time: %s
-							------------------------------
-							[ERROR: Docker Exec - %s phase]
-							Command run:
-							%s
-
-							Output/Error:
-							%s
-
-							Internal error:
-							%s
-							`, time.Now().Format(time.RFC3339), resp.ErrorDetail.Phase, resp.ErrorDetail.Command, 
-							resp.ErrorDetail.Output, resp.ErrorDetail.ErrMsg)
-							
-
-						cm.errorHistory = append(cm.errorHistory, errSection)
-						} else {
-							cm.errorHistory = append(cm.errorHistory, resp.Content)
-						}
-
-						if len(cm.errorHistory) > 0 {
-							errorSummary = "Previous execution errors:\n" + strings.Join(cm.errorHistory, "\n---\n") + "\n"
-						} else {
-							errorSummary = ""
-						}
-
-							// --- AGENT-AGNOSTIC CONTEXT: always included in prompt ---
-						var contextSection string
-						if resp.Context != nil && len(resp.Context) > 0 {
-							contextBytes, _ := json.MarshalIndent(resp.Context, "", "  ")
-							contextSection = "\n\n[Relevant Context Passed Down]:\n" + string(contextBytes)
-						} else {
-							contextSection = ""
-						}
-
-						newPrompt := fmt.Sprintf(
-`ERROR executing previous code.
-
-%s
-%s
-
-Original request: 
-%s
-
-Please fix the code and retry.`,
-						errorSummary, contextSection, resp.OriginContent,
-					)
-
-                    fixMsg := model.Message{
-                        Sender:      "Manager",
-                        Content:     newPrompt,
-                        MessageType: model.TypeRoute,
-                        RouteTarget: targetAgent,
-						Context:     resp.Context,
-                    }
-					utils.LogContext(fixMsg.Context, "Routing tool error fix to agent") // [ADDED]
-                    
-                    if inChan, ok := cm.agentInputs[targetAgent]; ok {
-                        inChan <- fixMsg
-                        resp = <-cm.agentOutputs[targetAgent]
-                        continue // chain: check next response
-                    } else {
-                        cm.output <- model.Message{Sender: "Manager", Content: "[ERROR] Could not find origin agent: " + targetAgent}
-                        break
-                    }
+            // *** Now, handle reply chaining ***
+            if resp.RouteTarget != "" && resp.RouteTarget != m.Name() {
+                utils.Logger.Debug().Str("next_agent", resp.RouteTarget).Msgf("Forwarding response to next agent: %s", resp.RouteTarget)
+                // Before: m.input <- resp
+                if resp.Context == nil {
+                    resp.Context = map[string]interface{}{}
                 }
 
-				// --- Route as instructed to agent (could be Assistant, etc) ---
-				if resp.MessageType == model.TypeRoute {
-					agentName := resp.RouteTarget
-					utils.Logger.Debug().
-						Str("task", resp.Content).
-						Msgf("Routing task to agent %s", agentName)
-					if inChan, ok := cm.agentInputs[agentName]; ok {
-						forward := resp
-                        forward.Context = mergeContext(forward.Context, resp.Context)
-                        utils.LogContext(forward.Context, fmt.Sprintf("Routing as instructed to %s", agentName)) // [ADDED]
-                        inChan <- forward
-                        resp = <-cm.agentOutputs[agentName]
-						continue // chain: check next response
-					} else {
-						utils.Logger.Error().
-							Str("agent", agentName).
-							Msgf("[ERROR] Unknown agent: %s", agentName)
-						cm.output <- model.Message{Sender: "Manager", Content: "[ERROR] Unknown agent: " + agentName}
-						break
-					}
-				}
-
-				// At the very end of your for loop (inside manager loop)
-				if resp.Sender != "Orchestrator" {
-					fwd := resp
-                    fwd.Context = mergeContext(fwd.Context, resp.Context)
-                    utils.LogContext(fwd.Context, "Rerouting normal output to Orchestrator") // [ADDED]
-                    cm.agentInputs["Orchestrator"] <- fwd
-                    resp = <-cm.agentOutputs["Orchestrator"]
-				} else {
-					utils.Logger.Debug().
-						Str("sender", resp.Sender).
-						Msgf("Final output: %s", resp.Content)
-						
-					utils.LogContext(resp.Context, "Final output from Orchestrator") // [ADDED]
-                   
-					cm.output <- resp
-					break // only emit to user if from orchestrator
-				}
-
-
-				// // --- Otherwise, just forward output ---
-				// utils.Logger.Debug().
-				// 	Str("sender", resp.Sender).
-				// 	Msgf("Final output from agent: %s", resp.Content)
-				// cm.output <- resp
-				// break
-			}
-		}
+				// resp.Context = filterContextForNext(resp.Context)
+                // --- FLATTEN before setting! ---
+	            // resp.Context["history"] = model.FlattenHistory(m.history) // inject up-to-date history
+				resp.Context["history"] = BuildChatHistoryForManager(m.history) // Flat, no recursion!
+	
+                // Forward immediately to next agent
+                m.input <- resp // enqueue next step
+            } else {
+                utils.Logger.Debug().Msg("No next agent specified, finalizing response")
+                m.output <- resp // finally output if no next step
+            }
+        }
 	}()
 }
-
-// [ADDED]: Merge context with right taking precedence
-func mergeContext(left, right map[string]interface{}) map[string]interface{} {
-    if left == nil && right == nil { return map[string]interface{}{} }
-    merged := make(map[string]interface{})
-    for k, v := range left { merged[k] = v }
-    for k, v := range right { merged[k] = v }
-    return merged
-}
-func getStringSlice(v interface{}) []string {
-    if v == nil { return nil }
-    if s, ok := v.([]string); ok { return s }
-    if s, ok := v.([]interface{}); ok {
-        var out []string
-        for _, v2 := range s {
-            if str, ok := v2.(string); ok { out = append(out, str) }
-        }
-        return out
-    }
-    return nil
+func (m *ChatManager) appendHistory(msg model.AgentMessage) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.history = append(m.history, msg)
 }
 
-// func (cm *ChatManager) Send(msg model.Message) {
-// 	cm.input <- msg
-// }
-
-// func (cm *ChatManager) Receive() model.Message {
-// 	return <-cm.output
-// }
-
-// Send injects a message into the chat workflow.
-func (cm *ChatManager) Send(msg model.Message) {
-    cm.input <- msg
+// Helper for manager (like BuildChatHistory above)
+func BuildChatHistoryForManager(history []model.AgentMessage) []model.AgentMessage {
+	flat := make([]model.AgentMessage, 0, len(history))
+	for _, m := range history {
+		copy := m
+		copy.Context = nil
+		flat = append(flat, copy)
+	}
+	return flat
 }
 
-// Receive returns the next message output by the orchestrated agents.
-func (cm *ChatManager) Receive() model.Message {
-    return <-cm.output
+// Generic role/route-based routing.
+// (You can replace with config-driven routing if you want full runtime flexibility)
+func (m *ChatManager) route(msg model.AgentMessage) string {
+	// 1. Route by explicit route_target (set by orchestrator or LLM)
+	if tgt := msg.RouteTarget; tgt != "" {
+		return tgt
+	}
+	// 2. Route by role -> agent name mapping
+	switch msg.Role {
+	case "ux":
+		return "UX Assistant"
+	case "assistant":
+		return "Assistant"
+	case "tool":
+		return "ToolRunner"
+	case "orchestrator":
+		return "Orchestrator"
+	case "user":
+		// Default for first user message
+		return "Orchestrator"
+	default:
+		// Fallback (should not occur if workflow is defined)
+		return "Assistant"
+	}
 }
-
-// InputChan exposes the chat manager's input channel (for user proxies).
-func (cm *ChatManager) InputChan() chan<- model.Message {
-    return cm.input
-}
-
-// OutputChan exposes the chat manager's output channel (if needed).
-func (cm *ChatManager) OutputChan() <-chan model.Message {
-    return cm.output
-}
-
-func (m *ChatManager) AgentInputChan(name string) chan<- model.Message {
-    return m.agentInputs[name]
-}
-func (m *ChatManager) AgentOutputChan(name string) <-chan model.Message {
-    return m.agentOutputs[name]
-}
-
-// History returns a copy of the conversation history.
-func (cm *ChatManager) History() []model.Message {
-    return append([]model.Message(nil), cm.history...)
-}
-
-// type Manager struct {
-//     agents []agent.AssistantAgent
-// }
-
-// func NewManager(agents []agent.AssistantAgent) *Manager {
-//     return &Manager{agents: agents}
-// }
-
-// func (m *Manager) Start() {
-//     input := make(chan model.Message)
-//     output := make(chan model.Message)
-
-//     // Start all agents
-//     for _, ag := range m.agents {
-//         ag.Start(input, output)
-//     }
-
-//     // todo pass in proper prompt input
-//     // Example: Send initial message
-//     input <- model.Message{Sender: "User", Content: "Find recent papers on LLM applications."}
-
-//     // Listen for responses
-//     go func() {
-//         for msg := range output {
-//             // Handle responses (e.g., log or further processing)
-//             fmt.Printf("[%s]: %s\n", msg.Sender, msg.Content)
-//         }
-//     }()
-// }

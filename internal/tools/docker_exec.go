@@ -11,7 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"aiupstart.com/go-gen/internal/common"
 	"aiupstart.com/go-gen/internal/metrics"
+	"aiupstart.com/go-gen/internal/model"
 	"aiupstart.com/go-gen/internal/utils"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
@@ -144,12 +146,128 @@ func (t *DockerExecTool) execInContainer(ctx context.Context, command string, ti
     return string(output), err
 }
 
-func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
+func (t *DockerExecTool) Run(ctx context.Context, call *common.ToolCall) (*common.ToolResult, error) {
+	utils.Logger.Debug().
+		Str("tool", t.Name()).
+		Msgf("###############################\nExecuting docker_exec tool call: %v \n##############################", call.Caller)
+	metrics.ToolCallsTotal.WithLabelValues(t.Name(), call.Caller).Inc()
+	timer := prometheus.NewTimer(metrics.ToolLatencySeconds.WithLabelValues(t.Name(), call.Caller))
+	defer timer.ObserveDuration()
+
+	timeoutSec := 90 // default
+	if to, ok := call.Args["timeout"].(float64); ok {
+		timeoutSec = int(to)
+	}
+	timeoutDuration := time.Duration(timeoutSec) * time.Second
+
+	langRaw, _ := call.Args["language"]
+	lang := strings.ToLower(fmt.Sprintf("%v", langRaw))
+
+	if err := t.ensureContainer(ctx, lang); err != nil {
+		utils.Logger.Error().Msgf("Failed to ensure container: %v", err)
+		return &common.ToolResult{
+			Role:     model.RoleTool,
+			ErrorMsg: fmt.Sprintf("Failed to ensure container: %v", err),
+		}, err
+	}
+
+	// 1. Parse code_blocks as array of CodeBlock
+	rawBlocks, ok := call.Args["code_blocks"].([]interface{})
+	if !ok || len(rawBlocks) == 0 {
+		err := fmt.Errorf("missing or invalid code_blocks argument")
+		return &common.ToolResult{Role: model.RoleTool, ErrorMsg: err.Error()}, err
+	}
+	utils.Logger.Debug().Str("tool", t.Name()).Msgf("About to process code blocks - %v", len(rawBlocks))
+	var blocks []CodeBlock
+	for _, b := range rawBlocks {
+		var cb CodeBlock
+		bytes, _ := utils.SafeMarshal(b)
+		if err := utils.SafeUnmarshal(bytes, &cb); err == nil {
+			blocks = append(blocks, cb)
+		}
+	}
+	if len(blocks) == 0 {
+		err := fmt.Errorf("no valid code blocks found")
+		return &common.ToolResult{Role: model.RoleTool, ErrorMsg: err.Error()}, err
+	}
+
+	if err := t.copyFilesToContainer(ctx, blocks); err != nil {
+		utils.Logger.Error().Msgf("Failed to copy files: %v", err)
+		return &common.ToolResult{Role: model.RoleTool, ErrorMsg: err.Error()}, err
+	}
+
+	utils.Logger.Debug().Str("tool", t.Name()).Msg("Finished copying files to container and about to run init and launch commands")
+
+	// 2. Run "init" command, if any
+	initCmd, _ := call.Args["init"].(string)
+	if strings.TrimSpace(initCmd) != "" {
+		utils.Logger.Debug().Str("tool", t.Name()).Msgf("About to execute the init command %s", initCmd)
+		initOut, err := t.execInContainer(ctx, initCmd, timeoutDuration)
+		if err != nil {
+			errDetail := formatExecError("init", initCmd, initOut, err.Error())
+			return &common.ToolResult{
+				Role:       model.RoleTool,
+				Output:     errDetail,
+				ErrorMsg:   err.Error(),
+				ErrorPhase: "init",
+				Command:    initCmd,
+				CmdOutput:  initOut,
+			}, err
+		}
+		utils.Logger.Debug().Str("tool", t.Name()).Msgf("Init command output: %s", initOut)
+	}
+
+	// 3. Run launch or constructed main command
+	launchCmd, _ := call.Args["launch"].(string)
+	var output string
+	var err error
+	if strings.TrimSpace(launchCmd) != "" {
+		launchCmd = patchAngularCmd(launchCmd)
+		utils.Logger.Debug().Str("tool", t.Name()).Msgf("About to execute launch command %s", launchCmd)
+		output, err = t.execInContainer(ctx, launchCmd, timeoutDuration)
+	} else if len(blocks) > 0 {
+		mainfile := blocks[0].FileName
+		run := ""
+		switch lang {
+		case "python":
+			run = fmt.Sprintf("python %s", mainfile)
+		case "bash", "sh":
+			run = fmt.Sprintf("sh %s", mainfile)
+		case "dotnet":
+			run = fmt.Sprintf("dotnet run --project %s", mainfile)
+		case "npm", "angular":
+			run = fmt.Sprintf("npm start")
+		default:
+			run = fmt.Sprintf("sh %s", mainfile)
+		}
+		utils.Logger.Debug().Str("tool", t.Name()).Msgf("About to execute launch command %s", run)
+		output, err = t.execInContainer(ctx, run, timeoutDuration)
+	}
+
+	if err != nil {
+		errDetail := formatExecError("launch", launchCmd, output, err.Error())
+		return &common.ToolResult{
+			Role:       model.RoleTool,
+			Output:     errDetail,
+			ErrorMsg:   err.Error(),
+			ErrorPhase: "launch",
+			Command:    launchCmd,
+			CmdOutput:  output,
+		}, err
+	}
+
+	return &common.ToolResult{
+		Role:   model.RoleTool,
+		Output: output,
+	}, nil
+}
+
+func (t *DockerExecTool) Call(ctx context.Context, call common.ToolCall) common.ToolResult {
 	utils.Logger.Debug().Str("tool", t.Name()).Msgf("###############################\nExecuting docker_exec tool call: %v \n##############################", call.Caller)
 	metrics.ToolCallsTotal.WithLabelValues(t.Name(), call.Caller).Inc()
 	timer := prometheus.NewTimer(metrics.ToolLatencySeconds.WithLabelValues(t.Name(), call.Caller))
 	defer timer.ObserveDuration()
-    timeoutSec := 90 // default
+    timeoutSec := 30 // default
     if to, ok := call.Args["timeout"].(float64); ok {
         timeoutSec = int(to)
     }
@@ -160,14 +278,14 @@ func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
 
 	if err := t.ensureContainer(ctx, lang); err != nil {
 		utils.Logger.Error().Msgf("Failed to ensure container: %v", err)
-		return ToolResult{Error: err}
+		return common.ToolResult{Error: err}
 	}
 
     
 	// 1. Parse code_blocks as array of CodeBlock
 	rawBlocks, ok := call.Args["code_blocks"].([]interface{})
 	if !ok || len(rawBlocks) == 0 {
-		return ToolResult{Error: fmt.Errorf("missing or invalid code_blocks argument")}
+		return common.ToolResult{Error: fmt.Errorf("missing or invalid code_blocks argument")}
 	}
     utils.Logger.Debug().Str("tool", t.Name()).Msgf("About to process code blocks - %v", len(rawBlocks))
 	var blocks []CodeBlock
@@ -180,11 +298,11 @@ func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
 		}
 	}
 	if len(blocks) == 0 {
-		return ToolResult{Error: fmt.Errorf("no valid code blocks found")}
+		return common.ToolResult{Error: fmt.Errorf("no valid code blocks found")}
 	}
 
 	if err := t.copyFilesToContainer(ctx, blocks); err != nil {
-		return ToolResult{Error: err}
+		return common.ToolResult{Error: err}
 	}
 
     utils.Logger.Debug().Str("tool", t.Name()).Msg("Finished copying files to container and about to run init and launch commands")
@@ -196,10 +314,10 @@ func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
 		initOut, err := t.execInContainer(ctx, initCmd, timeoutDuration)
 		if err != nil {
             errDetail := formatExecError("init", initCmd, initOut, err.Error())
-            return ToolResult{
+            return common.ToolResult{
                 Output: errDetail,
                 Error: err,
-                ErrorDetail: &ExecErrorDetail{
+                ErrorDetail: &common.ExecErrorDetail{
                     Phase:   "init",
                     Command: initCmd,
                     Output:  initOut,
@@ -240,10 +358,10 @@ func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
 
     if err != nil {
         errDetail := formatExecError("launch", launchCmd, output, err.Error())
-        return ToolResult{
+        return common.ToolResult{
             Output: errDetail,
             Error:  fmt.Errorf("init failed: %w", err),
-            ErrorDetail: &ExecErrorDetail{
+            ErrorDetail: &common.ExecErrorDetail{
                 Phase:   "launch",
                 Command: launchCmd,
                 Output:  output,
@@ -251,7 +369,7 @@ func (t *DockerExecTool) Call(ctx context.Context, call ToolCall) ToolResult {
             },
         }
     }
-	return ToolResult{
+	return common.ToolResult{
 		Output: output,
 		Error:  err,
 	}

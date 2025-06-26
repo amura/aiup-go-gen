@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"aiupstart.com/go-gen/internal/common"
 )
 
 type ToolRegistry struct {
@@ -51,10 +53,10 @@ func (tr *ToolRegistry) DescribeTools() string {
 }
 
 // Dynamic tool invocation by name (with trace support)
-func (r *ToolRegistry) CallTool(ctx context.Context, call ToolCall) ToolResult {
+func (r *ToolRegistry) CallTool(ctx context.Context, call common.ToolCall) common.ToolResult {
     tool, ok := r.Get(call.Name)
     if !ok {
-        return ToolResult{Error: fmt.Errorf("tool not found: %s", call.Name)}
+        return common.ToolResult{Error: fmt.Errorf("tool not found: %s", call.Name)}
     }
     // Extend trace
     call.Trace = append(call.Trace, call.Name)
@@ -62,10 +64,10 @@ func (r *ToolRegistry) CallTool(ctx context.Context, call ToolCall) ToolResult {
 }
 
 // This is what you need to add:
-func (r *ToolRegistry) Call(ctx context.Context, call ToolCall) ToolResult {
+func (r *ToolRegistry) Call(ctx context.Context, call common.ToolCall) common.ToolResult {
     tool, ok := r.tools[call.Name]
     if !ok {
-        return ToolResult{Error: fmt.Errorf("unknown tool: %s", call.Name)}
+        return common.ToolResult{Error: fmt.Errorf("unknown tool: %s", call.Name)}
     }
     return tool.Call(ctx, call)
 }

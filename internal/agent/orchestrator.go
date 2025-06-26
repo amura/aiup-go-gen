@@ -4,176 +4,185 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
-
 	"aiupstart.com/go-gen/internal/llm"
 	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/model"
-	"aiupstart.com/go-gen/internal/tools"
 	"aiupstart.com/go-gen/internal/utils"
 )
 
 const orchestrationPrompt = `
 You are an orchestration agent for an AI multi-agent system.
-Your job is to read the user's request and decide **which agent** should handle it next.
+All communication and handoff must use strict JSON in the format:
+{ "role": "...", "type": "...", "content": "...", ... }
+NEVER return free-form text. Only valid JSON objects, always with role and type.
 
 Guidelines:
-- If the request involves UI or wireframes, FIRST send it to the "UX Assistant" for wireframe generation.
-- Once wireframes are complete, IMMEDIATELY hand off the next step to the "Assistant" agent to generate code. Do NOT assign the same subtask to the same agent repeatedly.
-- If code needs to be executed or validated, send it to the ToolRunnerAgent.
-- If the code fails verification, send the error and original request back to the "Assistant" agent for correction and retry.
-- When an agent's reply contains a clear handoff phrase such as "Requesting Assistant agent to code this UI in Angular", ALWAYS assign the next subtask to the agent mentioned in the handoff (e.g., "Assistant"). Never assign the same subtask to the same agent more than once unless it is a new, different subtask.
-- Repeat until the task is completed or the user explicitly stops the process.
-
-You MUST reply ONLY with a JSON object in one of the following formats:
-- To assign: {"agent": "<agent_name>", "subtask": "<task or code to perform>"}
-- To verify code: {"tool": "docker_exec", "args": { "language": "...", "code": "...", ... }}
+- If the request involves UI or wireframes, send to the UX agent ("role": "ux").
+- Once wireframes are complete, immediately hand off to the assistant agent ("role": "assistant").
+- If code/tool execution is required, hand off to the appropriate tool agent ("role": "tool", type: "tool_call").
+- On tool error, always send full context, wireframes, and previous error info back to the coding agent for repair.
+- When delegating to another agent, include *all* previous relevant content as context in your output JSON.
+- For all agent routing: reply as
+  { "role": "orchestrator", "type": "route", "content": "<brief reason>", "route_target": "<agent name>", "context": {...} }
 
 Agents available:
 %s
 
-User's request:
-"%s"
+Latest message (from %s):
+%s
+
+Full context history:
+%s
 `
 
-type LLMOrchToolResponse struct {
-	Tool string                 `json:"tool"`
-	Args map[string]interface{} `json:"args"`
-}
-type LLMOrchAgentResponse struct {
-	Agent   string `json:"agent"`
-	Subtask string `json:"subtask"`
+// ----------- CHANGES: Workflow map is primary decision mechanism -------------
+var DefaultWorkflow = map[string]string{
+	"user":      "ux",        // User messages go to UX agent
+	"ux":        "assistant", // UX agent output to Assistant
+	"assistant": "tool",      // Assistant output to ToolRunner (if tool_call)
+	"tool":      "assistant", // On error or finish, back to Assistant
 }
 
-// OrchestratorAgent handles planning and routing.
 type OrchestratorAgent struct {
 	name        string
 	description string
 	manager     *ChatManager
 	agentList   []Agent
-	strategy    func(request model.Message, agents []Agent) int
 	llmClient   llm.LLMClient
-	lastOutput  string
+	workflow    map[string]string // role -> next role
 }
 
-func NewOrchestratorAgent(name string, manager *ChatManager, agentList []Agent, llmClient llm.LLMClient) *OrchestratorAgent {
-	return &OrchestratorAgent{name: name, manager: manager, agentList: agentList, llmClient: llmClient}
+func NewOrchestratorAgent(
+	name string,
+	manager *ChatManager,
+	agentList []Agent,
+	llmClient llm.LLMClient,
+	workflow map[string]string,
+) *OrchestratorAgent {
+	if workflow == nil {
+		workflow = DefaultWorkflow
+	}
+	return &OrchestratorAgent{
+		name:      name,
+		manager:   manager,
+		agentList: agentList,
+		llmClient: llmClient,
+		workflow:  workflow,
+	}
 }
 
 func (o *OrchestratorAgent) Name() string        { return o.name }
 func (o *OrchestratorAgent) Description() string { return o.description }
+func (o *OrchestratorAgent) SetDescription(desc string) {
+	o.description = desc
+}
 func (o *OrchestratorAgent) SetManager(manager *ChatManager) {
 	o.manager = manager
 }
 
-func (o *OrchestratorAgent) Start(input <-chan model.Message, output chan<- model.Message) {
+func (o *OrchestratorAgent) Start(input <-chan model.AgentMessage, output chan<- model.AgentMessage) {
 	go func() {
-		lastAgent := ""
 		for msg := range input {
 			metrics.AgentMessagesTotal.WithLabelValues(o.Name()).Inc()
+			utils.LogContext(msg.Context, "Orchestrator received context")
 			utils.Logger.Debug().
 				Str("agent", o.name).
 				Str("event", "received_message").
 				Msgf("Received: %s", msg.Content)
 
-			utils.LogContext(msg.Context, "Orchestrator received context")
+			currRole := msg.Role
 
+			// ----------- [1] Workflow map for routing -------------
+			nextRole, found := o.workflow[currRole]
+			if found {
+				routeMsg := model.AgentMessage{
+					Role:       model.RoleOrchestrator,
+					Type:       model.TypeRoute,
+					Sender:     o.name,
+					Content:    msg.Content, // fmt.Sprintf("Routing from role %s to role %s as per workflow", currRole, nextRole),
+					RouteTarget: nextRole,
+					Context:    cloneContext(msg.Context),
+					OriginAgent: o.name,
+				}
+
+				utils.Logger.Info().
+					Str("from", currRole).
+					Str("to", nextRole).
+					Msg("Workflow-based route by orchestrator")
+				output <- routeMsg
+				continue
+			}
+
+			// ----------- [2] Fallback: Use LLM prompt to determine route -------------
+			// Compose agent list description for LLM prompt
 			agentListStr := ""
 			for _, a := range o.agentList {
-				agentListStr += fmt.Sprintf("- %s \t %s \n", a.Name(), a.Description())
+				agentListStr += fmt.Sprintf("- %s\t%s\n", a.Name(), a.Description())
 			}
 
-			// [GENERIC]: Always pass forward ALL context!
-			mergedContext := make(map[string]interface{})
-			for k, v := range msg.Context {
-				mergedContext[k] = v
-			}
+			history := o.manager.history
+			latestMsg := model.SafeJSON(msg)
+			historyJSON := model.SafeJSON(history)
+			prompt := fmt.Sprintf(
+				orchestrationPrompt,
+				agentListStr,
+				msg.Role,
+				latestMsg,
+				historyJSON,
+			)
 
-			prompt := fmt.Sprintf(orchestrationPrompt, agentListStr, msg.Content)
-			llmResp, err := o.llmClient.Generate(prompt)
+			llmResp, err := o.llmClient.Generate(history, prompt)
 			if err != nil {
-				utils.Logger.Error().
-					Str("agent", o.name).
-					Msgf("[Orchestrator LLM ERROR]: %v", err)
-				output <- model.Message{
-					Sender:      o.name,
-					Content:     "[Orchestrator LLM ERROR]: " + err.Error(),
-					MessageType: model.TypeRoute,
-					RouteTarget: "Assistant",
-					Context:     mergedContext,
+				utils.Logger.Error().Err(err).Msg("Orchestrator LLM error")
+				output <- model.AgentMessage{
+					Role:    model.RoleOrchestrator,
+					Type:    model.TypeError,
+					Sender:  o.name,
+					Content: "[Orchestrator LLM ERROR]: " + err.Error(),
+					Context: msg.Context,
 				}
 				continue
 			}
 
-			// Try tool call (function calling) FIRST!
-			var toolResp LLMOrchToolResponse
-			if err := json.Unmarshal([]byte(llmResp.Content), &toolResp); err == nil && toolResp.Tool != "" {
-				utils.Logger.Debug().Msgf("Routing tool call to: %s", toolResp.Tool)
-				toolAgent := ToolNameToAgent(toolResp.Tool)
-				output <- model.Message{
-					Sender:      o.name,
-					MessageType: model.TypeRoute,
-					RouteTarget: toolAgent,
-					ToolCall: &tools.ToolCall{
-						Name:   toolResp.Tool,
-						Args:   toolResp.Args,
-						Caller: o.name,
-					},
-					Content: fmt.Sprintf("Tool call for %s", toolResp.Tool),
-					Context: mergedContext,
+			var routeMsg model.AgentMessage
+			if err := json.Unmarshal([]byte(llmResp.Content), &routeMsg); err != nil {
+				utils.Logger.Error().Err(err).Str("llm_output", llmResp.Content).Msg("Failed to unmarshal Orchestrator LLM response")
+				routeMsg = model.AgentMessage{
+					Role:    model.RoleOrchestrator,
+					Type:    model.TypeError,
+					Sender:  o.name,
+					Content: "[Orchestrator LLM output not valid JSON AgentMessage]: " + err.Error(),
+					Context: msg.Context,
 				}
-				continue
+			}
+			// Merge context just in case
+			if routeMsg.Context == nil {
+				routeMsg.Context = make(map[string]interface{})
+			}
+			for k, v := range msg.Context {
+				routeMsg.Context[k] = v
 			}
 
-			// Otherwise: agent handoff
-			var routeResp LLMOrchAgentResponse
-			if err := json.Unmarshal([]byte(llmResp.Content), &routeResp); err != nil || routeResp.Agent == "" {
-				// Fallback: check for classic handoff language
-				handoff := false
-				lowerContent := strings.ToLower(msg.Content)
-				if strings.Contains(lowerContent, "requesting assistant agent") ||
-					strings.Contains(lowerContent, "code this ui in angular") {
-					handoff = true
-				}
-				if routeResp.Agent == lastAgent && handoff {
-					utils.Logger.Warn().Msgf("Detected handover cue in message; overriding next agent to 'Assistant'")
-					routeResp.Agent = "Assistant"
-				}
-				lastAgent = routeResp.Agent
-				o.lastOutput = msg.Content // Always store full previous output!
-				utils.Logger.Debug().Msgf("Passing previous agent's full output as subtask to %s", routeResp.Agent)
-				output <- model.Message{
-					Sender:      o.name,
-					Content:     o.lastOutput,
-					MessageType: model.TypeRoute,
-					RouteTarget: routeResp.Agent,
-					Context:     mergedContext,
-				}
-				continue
-			}
+			utils.Logger.Debug().
+				Str("agent", o.name).
+				Str("event", "routing").
+				Str("to", routeMsg.RouteTarget).
+				Str("type", string(routeMsg.Type)).
+				Msg("Orchestrator routing decision (via LLM)")
 
-			// Normal route: pass latest agent's full output
-			o.lastOutput = msg.Content
-			output <- model.Message{
-				Sender:      o.name,
-				Content:     o.lastOutput,
-				MessageType: model.TypeRoute,
-				RouteTarget: routeResp.Agent,
-				Context:     mergedContext,
-			}
+			output <- routeMsg
 		}
 	}()
 }
 
-// ToolNameToAgent returns the agent for a given tool
-func ToolNameToAgent(tool string) string {
-	switch tool {
-	case "docker_exec":
-		return "ToolRunner"
-	case "stripe_mcp":
-		return "HITL"
-	// Add more as needed
-	default:
-		return "Assistant"
+// Utility to clone a map for context (avoid sharing pointer)
+func cloneContext(orig map[string]interface{}) map[string]interface{} {
+	if orig == nil {
+		return nil
 	}
+	copy := make(map[string]interface{}, len(orig))
+	for k, v := range orig {
+		copy[k] = v
+	}
+	return copy
 }

@@ -86,3 +86,4 @@ func SafeMarshal(v interface{}) ([]byte, error) {
 func SafeUnmarshal(data []byte, v interface{}) error {
 	return json.Unmarshal(data, v)
 }
+

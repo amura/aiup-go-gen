@@ -33,22 +33,21 @@ func (a *ToolRunnerAgent) CleanupContainer(ctx context.Context) error {
     return nil
 }
 
-func (a *ToolRunnerAgent) Start(input <-chan model.Message, output chan<- model.Message) {
+func (a *ToolRunnerAgent) Start(input <-chan model.AgentMessage, output chan<- model.AgentMessage) {
 	go func() {
 		for msg := range input {
-			fmt.Println("ToolRunner received message!")
 			utils.Logger.Debug().
 				Str("agent", a.name).
 				Str("event", "received_message").
 				Msgf("Received: %s", msg.Content)
-			utils.LogContext(msg.Context, "ToolRunner received context") // [ADDED]
-           
+			utils.LogContext(msg.Context, "ToolRunner received context")
+
 			ctx := msg.Context
 			if ctx == nil {
 				ctx = map[string]interface{}{}
 			}
-				
-			if msg.MessageType == model.TypeToolCall && msg.ToolCall != nil {
+
+			if msg.Type == model.TypeToolCall && msg.ToolCall != nil {
 				result := a.registry.Call(context.TODO(), *msg.ToolCall)
 
 				utils.Logger.Debug().
@@ -56,21 +55,39 @@ func (a *ToolRunnerAgent) Start(input <-chan model.Message, output chan<- model.
 					Str("tool", msg.ToolCall.Name).
 					Msgf("Tool call result:\n\n  %v \n\n", result.Output)
 
-				output <- model.Message{
-					Sender:      a.name,
-					Content:     fmt.Sprintf("%v", result.Output), // Safely stringify any output,
-					MessageType: model.TypeToolResult,
-					IsError: result.Error != nil,
-					Error: result.Error,
-					OriginAgent:   msg.OriginAgent,    // <---- PRESERVE!
-					OriginContent: msg.OriginContent,  // <---- PRESERVE!
-					Context:       ctx, // Pass-through context
+				// On error, add error/output to context for Assistant
+				if result.Error != nil {
+					ctx["tool_error"] = result.Output
+					ctx["tool_error_detail"] = result.Error.Error()
+					ctx["tool_phase"] = "tool_call"
+					ctx["tool_name"] = msg.ToolCall.Name
+					ctx["tool_id"] = msg.ToolCall.ID
+				}
+
+				// Always route result back to the original caller (assistant, etc)
+				output <- model.AgentMessage{
+					Role:          "tool",
+					Sender:        a.name,
+					Content:       fmt.Sprintf("%v", result.Output),
+					Type:          model.TypeToolResult,
+					RouteTarget:   msg.ToolCall.Caller, // Dynamic! E.g. "assistant"
+					ErrorDetail: &model.ErrorDetail{
+						Phase:   "tool_call",
+						Command: msg.ToolCall.Name,
+						Output:  fmt.Sprintf("%v", result.Output),
+						ErrMsg:  fmt.Sprintf("%v", result.Error),
+					},
+					OriginAgent:   msg.Sender,
+					OriginContent: msg.Content,
+					Context:       ctx,
+					ToolCall: msg.ToolCall,
+					ToolCallID: msg.ToolCall.ID,
+					ToolResult:    &model.ToolResult{Output: result.Output, Error: result.Error.Error()},
 				}
 			} else {
 				utils.Logger.Warn().
 					Str("agent", a.name).
 					Msgf("Received non-tool call message: %s", msg.Content)
-			
 			}
 		}
 	}()
