@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"aiupstart.com/go-gen/internal/agent"
 	"aiupstart.com/go-gen/internal/config"
@@ -75,7 +76,9 @@ NB. Do not ask user any questions or request any feedback, the coding agent will
 
 `
 
-ui_coder_prompt := `
+execToolName :=  "docker_exec" //"docker_exec"
+
+ui_coder_prompt := fmt.Sprintf(`
 
 ## Task
 - You receive a user request to create for an Angular project.
@@ -83,8 +86,9 @@ ui_coder_prompt := `
 - Code a secure Web application that meets the request.
 - Using mainly the angular cli tool available, provide all necessary files (components, services, pipes, etc.) following best angular practices, placing each code file in separate code blocks as per the tool
 - Where interaction with an API is required, use environment variables for the API base URL, and use mocks for the API calls when executing the code.
-- Wait for the docker executor to report success or failure of launching the web app, and fix any errors or warnings accordingly.
+- Wait for the %s executor to report success or failure of launching the web app, and fix any errors or warnings accordingly.
 - Keep your comments or reasoning explanatory text to absolute minimum.
+- You must ensure the site uses SSL certificates and is secure by default.
 - You must attempt to launch the web app once it has built using ng serve, and report any errors or warnings to the user.
 
 ## Code Requirements
@@ -112,26 +116,26 @@ ui_coder_prompt := `
 ## Additonal text in output
 - When including any extra comments or chain of thought reasoning whilst resolving issues, this must only be included in the following format:
 
-    ###BEGIN_LLM_COMMENTS
-    Your comments or notes here, in plain text.
-    ###END_LLM_COMMENTS
+	###BEGIN_LLM_COMMENTS
+	Your comments or notes here, in plain text.
+	###END_LLM_COMMENTS
 
 - Do not include these boundary markers in any other context. Do not reveal hidden chain-of-thought outside these markers.
 
 ## Environment Variables
 Use the following environment variables where needed:
-    AZURE_CLIENTID
-    AZURE_APIID
-    AZURE_AUTHORITY
-    AZURE_TENANT
-    AZURE_POLICY
-    AZURE_SCOPE
-    API_BASE_URL
+	AZURE_CLIENTID
+	AZURE_APIID
+	AZURE_AUTHORITY
+	AZURE_TENANT
+	AZURE_POLICY
+	AZURE_SCOPE
+	API_BASE_URL
 
 ## Error Flow
-- If the docker executor indicates an error (non-zero exit code), revise the entire code
+- If the %s executor indicates an error (non-zero exit code), revise the entire code
 
-For all code execution or bug fixing, use the docker_exec tool.
+For all code execution or bug fixing, use the %s tool.
 For multi-file outputs, provide code_blocks as an array of objects.
 Each object should have:
 - language: file language (e.g. python, bash, typescript)
@@ -148,7 +152,7 @@ When generating shell or CLI commands, you must always include flags that ensure
 
 Otherwise, reply with your answer directly.
 
-`
+`, execToolName, execToolName, execToolName)
 
 	_ = godotenv.Load() // Loads .env file if present
 
@@ -188,13 +192,35 @@ Otherwise, reply with your answer directly.
 	openAITools := llm.BuildOpenAIToolsFromConfig(mcp_cfg)
 	llmClient := llm.NewOpenAILLMClient(apiKey,"gpt-4o", openAITools)
 
-	// Register tools only if enabled
-	// if cfg == nil || toolEnabled(cfg, "fetch_arxiv") {
-	// 	registry.Register(&tools.FetchArxivTool{})
-	// }
+	
+	if execToolName == "docker_exec" {
 
-	newDockerExec := tools.NewDockerExecTool("go-gen-", "angular-dev:latest")
-	registry.Register(newDockerExec)
+		newDockerExec := tools.NewDockerExecTool("go-gen-", "angular-dev:latest")
+		registry.Register(newDockerExec)
+	}
+
+
+	daggerConfig := tools.DaggerExecConfig{
+		Image:         "",  // need to update to include file path to Dockerfile
+		Workdir:       "/src",
+		MountPath:     "/src",
+		OutputPath:    "/src/dist",
+		Timeout:       45 * time.Second,
+		Env:           map[string]string{"API_BASE_URL": "..."},
+		CopyToHostDir: "./dist",
+	}
+
+	daggerExec := tools.NewDaggerExecTool(
+		"dagger_exec",
+		"Dagger-based container executor for code and build",
+		daggerConfig,
+	)
+
+	if execToolName == "dagger_exec" {
+
+		registry.Register(daggerExec)
+	}
+
 
 	// Put your actual prompt strings here, or load from file/config.
 	// ui_coder_prompt := "You are a coding agent. ..." // <--- put your actual UI coder prompt here

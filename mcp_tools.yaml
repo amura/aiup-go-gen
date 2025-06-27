@@ -97,6 +97,71 @@ mcp_tools:
           docker_file:
             type: string
             description: Optional Dockerfile content if a custom image is needed.
+          ports:
+            type: array
+            items:
+              type: string
+              description: Optional port mapping to expose for the docker container, useful for web applications. e.g. 4205:80
+        required:
+          - language
+          - code_blocks
+- name: dagger_exec
+  operations:
+    - name: dagger_exec
+      description: Execute and validate code blocks by executing them in a docker container via dagger. Ensure to include initialization and launch scripts to install dependencies needed and then launch the solution.
+      example_args:
+        code_blocks:
+          - |
+            ```bash
+            # filename: test.sh
+            echo "Hello world"
+            ```
+          - |
+            ```bash
+            # filename: init.sh
+            apt-get update && apt-get install -y nodejs
+            ```
+        init: "init.sh"
+        launch: "test.sh"
+        timeout: "90"
+        ports: ["4205:80"]
+      parameters:
+        type: object
+        properties:
+          language:
+            type: string
+            description: The language or environment (e.g., python, bash, dotnet, angular)
+          code_blocks:
+            type: array
+            description: List of code files to execute, each with language, filename, and code.
+            items:
+                type: object
+                properties:
+                  language:
+                    type: string
+                    description: File language (e.g., python, bash, sh, typescript)
+                  filename:
+                    type: string
+                    description: Name and full path of the code file (e.g., main.py, app\start.sh)
+                  code:
+                    type: string
+                    description: The full code/content of the file.
+                required:
+                  - language
+                  - filename
+                  - code
+          init:
+            type: string
+            description: Optional initialization script or command.
+          launch:
+            type: string
+            description: Optional launch command e.g. ng serve, dotnet run or shell script to execute such as launch.sh (ensure chmod +x).
+          timeout:
+            type: number
+            description: The max timeout in seconds for which either launch or init commands should be executed before termination. Avoids waiting for ever.
+          docker_file:
+            type: string
+            description: Optional Dockerfile content if a custom image is needed.
         required:
           - language
           - code_blocks
