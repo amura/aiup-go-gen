@@ -64,6 +64,11 @@ Ensure this output is valid JSON:
 
 `
 
+// HistoryProvider interface allows agents to get history from a central source
+type HistoryProvider interface {
+	GetHistoryForAgent(agentName string) []model.AgentMessage
+}
+
 // persona, prompt, tools, user request
 
 // AssistantAgent is a single-agent implementation using strict role/content JSON messaging.
@@ -76,9 +81,10 @@ type AssistantAgent struct {
 	toolRegistry    *tools.ToolRegistry
 	promptOverload  string // If present, overloads the default prompt template.
 	toolAgentPrompt map[string]interface{}
+	historyProvider HistoryProvider // Add history provider reference
 }
 
-func NewAssistantAgent(name string, role string, llmClient llm.LLMClient, persona string, promptOverload string, registry *tools.ToolRegistry) *AssistantAgent {
+func NewAssistantAgent(name string, role string, llmClient llm.LLMClient, persona string, promptOverload string, registry *tools.ToolRegistry, historyProvider HistoryProvider) *AssistantAgent {
 	return &AssistantAgent{
 		name:            name,
 		role:            role,
@@ -87,12 +93,14 @@ func NewAssistantAgent(name string, role string, llmClient llm.LLMClient, person
 		persona:         persona,
 		promptOverload:  promptOverload,
 		toolAgentPrompt: make(map[string]interface{}), // Initialize as nil, will be set when tool calls are made
+		historyProvider: historyProvider,
 	}
 }
 
-func (a *AssistantAgent) Name() string               { return a.name }
-func (a *AssistantAgent) Description() string        { return a.description }
-func (a *AssistantAgent) SetDescription(desc string) { a.description = desc }
+func (a *AssistantAgent) Name() string                                { return a.name }
+func (a *AssistantAgent) Description() string                         { return a.description }
+func (a *AssistantAgent) SetDescription(desc string)                  { a.description = desc }
+func (a *AssistantAgent) SetHistoryProvider(provider HistoryProvider) { a.historyProvider = provider }
 
 // BuildChatHistory transforms []AgentMessage into []llm.ChatMessage for LLM context.
 func BuildChatHistory(history []model.AgentMessage) []model.AgentMessage {
@@ -142,75 +150,30 @@ func (a *AssistantAgent) Start(input <-chan model.AgentMessage, output chan<- mo
 					if prevPrompt, ok := a.toolAgentPrompt[toolID]; ok {
 
 						prompt = injectError(msg, prevPrompt.(string))
-						history = model.BuildChatHistory(msg.Context)
-
-						// // set the toolresult on the last history item
-						// // if len(history) > 0 {
-						// // 	lastIndex := len(history) - 1
-						// // 	history[lastIndex].ToolResult = msg.ToolResult
-						// // }
-
-						// history = append(history, model.AgentMessage{
-						// 	Role:       a.role,
-						// 	Type:       model.TypeToolResult,
-						// 	Content:    msg.Content,
-						// 	ToolCall:   msg.ToolCall,
-						// 	ToolResult: msg.ToolResult,
-						// 	Context:    msg.Context,
-						// })
+						// Get fresh history from history provider instead of context
+						if a.historyProvider != nil {
+							history = a.historyProvider.GetHistoryForAgent(a.name)
+						} else {
+							history = model.BuildChatHistory(msg.Context) // fallback
+						}
 					}
 				}
 			} else {
 
-				// If context includes history, use it for LLM (Autogen style)
-				// var history []model.AgentMessage
-				// if hist, ok := msg.Context["history"].([]model.AgentMessage); ok && len(hist) > 0 {
-				// 	history = model.FlattenHistory(hist)
-				// } else {
-				// 	history = model.FlattenHistory([]model.AgentMessage{msg})
-				// }
-				history = model.BuildChatHistory(msg.Context)
+				// Get fresh history from history provider instead of context
+				if a.historyProvider != nil {
+					history = a.historyProvider.GetHistoryForAgent(a.name)
+				} else {
+					history = model.BuildChatHistory(msg.Context) // fallback
+				}
 
-				// prompt := strings.ReplaceAll(a.promptOverload, "T_B_T", "```")
-				// persona := a.persona
-				// if persona == "" {
-				// 	persona = defaultPersona
-				// }
-
-				// // if not prompt overload, use defaults
-				// if prompt == "" {
-				// 	utils.Logger.Debug().Msg("Using default prompt template for AssistantAgent")
-				// 	// persona, prompt, tools, user request: formats
-				// 	prompt = fmt.Sprintf(
-				// 		strings.ReplaceAll(outputInstructions, "T_B_T", "```"),
-				// 		persona,
-				// 		defaultPrompt,
-				// 		a.toolRegistry.DescribeTools(), // tools
-				// 		msg.Content,  // user request
-				// 	)
-				// } else {
-				// 	utils.Logger.Debug().Msg("Using prompt overload for AssistantAgent")
-				// 	prompt = fmt.Sprintf(
-				// 		strings.ReplaceAll(outputInstructions, "T_B_T", "```"),
-				// 		persona,
-				// 		prompt,
-				// 		a.toolRegistry.DescribeTools(), // tools
-				// 		msg.Content,  // user request
-				// 	)
-				// }
 
 				prompt = BuildUpPrompt(history, msg.Content, a)
 
+				// tempPrompt := prompt
+
 				// Build LLM prompt, injecting error details from previous tool execution if present.
 				prompt = injectError(msg, prompt)
-
-				// In your AssistantAgent.Start (pseudo code inside the tool error handling branch):
-				// if LastToolFailed(history) {
-				// 	prevAssistant := FindPrecedingAssistant(history)
-				// 	if prevAssistant != nil {
-				// 		prompt += "\n\n----\nPREVIOUS ASSISTANT OUTPUT (for repair):\n" + prevAssistant.Content + "\n----\n"
-				// 	}
-				// }
 
 				// If the last tool call failed, inject previous assistant output for context
 				if errText, ok := msg.Context["tool_error"].(string); ok && errText != "" {
@@ -228,7 +191,7 @@ func (a *AssistantAgent) Start(input <-chan model.AgentMessage, output chan<- mo
 
 				utils.Logger.Debug().
 					Str("agent", a.name).
-					Msgf("About to call llm with prompt %s", prompt[:min(50, len(prompt))]) // Log first 100 chars
+					Msgf("About to call llm with prompt \n %s", prompt[:min(500000, len(prompt))]) //Was 50!!!  Log first 100 chars
 			}
 
 			filteredHistory := filterAgentHistory(history)
@@ -270,6 +233,10 @@ func (a *AssistantAgent) Start(input <-chan model.AgentMessage, output chan<- mo
 						Context:     msg.Context,
 						RouteTarget: "toolrunner", // todo improve via e.g. a.toolRegistry.GetRunnerAgentName(tc.Name) or let orch decide by setting blank
 					}
+					utils.Logger.Debug().
+						Str("agent", a.name).
+						Str("tool_call", tc.Name).
+						Msgf("Generated tool call: %s with ID %s", tc.Name, tc.ID)
 					a.toolAgentPrompt[tc.ID] = prompt // Use the agent name as the caller
 					output <- am
 				}
@@ -319,11 +286,11 @@ func filterAgentHistory(history []model.AgentMessage) []model.AgentMessage {
 			// skip
 		default:
 			// Only deduplicate tool calls, let all other messages pass through
-			if m.ToolCall != nil  {
+			if m.ToolCall != nil {
 				if m.ToolCall.ID == "" {
 					utils.Logger.Error().Msg("Tool call message found in history with empty ID! This is a bug in the code that generates tool calls.")
-                	panic("tool_call message found in history with empty ID! You must fix the code that generates tool calls.")
-            	}
+					panic("tool_call message found in history with empty ID! You must fix the code that generates tool calls.")
+				}
 				if seenToolCallIDs[fmt.Sprintf("%s:%s", m.Role, m.ToolCall.ID)] {
 					continue // skip duplicate
 				}

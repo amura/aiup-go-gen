@@ -8,6 +8,9 @@ import (
 	"aiupstart.com/go-gen/internal/utils"
 )
 
+// ChatManager implements HistoryProvider interface
+var _ HistoryProvider = (*ChatManager)(nil)
+
 type ChatManager struct {
 	name         string
 	agents       map[string]Agent
@@ -37,8 +40,8 @@ func NewChatManager(agents []Agent) *ChatManager {
 	return cm
 }
 
-func (m *ChatManager) Name() string        { return m.name }
-func (m *ChatManager) Description() string { return "ChatManager for agent coordination" }
+func (m *ChatManager) Name() string            { return m.name }
+func (m *ChatManager) Description() string     { return "ChatManager for agent coordination" }
 func (m *ChatManager) SetDescription(d string) {}
 
 func (m *ChatManager) RegisterAgent(agent Agent) {
@@ -62,65 +65,83 @@ func (m *ChatManager) SendToAgent(agentName string, msg model.AgentMessage) {
 
 func (m *ChatManager) InputChan() chan model.AgentMessage  { return m.input }
 func (m *ChatManager) OutputChan() chan model.AgentMessage { return m.output }
-func (m *ChatManager) AgentInputChan(agentName string) chan model.AgentMessage  { return m.agentInputs[agentName] }
-func (m *ChatManager) AgentOutputChan(agentName string) chan model.AgentMessage { return m.agentOutputs[agentName] }
+func (m *ChatManager) AgentInputChan(agentName string) chan model.AgentMessage {
+	return m.agentInputs[agentName]
+}
+func (m *ChatManager) AgentOutputChan(agentName string) chan model.AgentMessage {
+	return m.agentOutputs[agentName]
+}
 
 func (m *ChatManager) Start() {
 	go func() {
 		for msg := range m.input {
-            metrics.AgentMessagesTotal.WithLabelValues(m.Name()).Inc()
-            utils.Logger.Debug().Str("sender", msg.OriginAgent).Msgf("Manager received message: %s", msg.Content)
-            m.appendHistory(msg)
+			metrics.AgentMessagesTotal.WithLabelValues(m.Name()).Inc()
+			utils.Logger.Debug().Str("sender", msg.OriginAgent).Msgf("Manager received message: %v", len(msg.Content))
+			m.appendHistory(msg)
 
-            var targetAgent string
+			var targetAgent string
 
-            if msg.RouteTarget != "" && msg.RouteTarget != m.Name() {
-                // If a route_target is specified, go directly there
-                targetAgent = msg.RouteTarget
-            } else if msg.Role == "user" {
-                // All user input first goes to orchestrator
-                targetAgent = "Orchestrator"
-            } else {
-                // Fallback: orchestrator decides
-                targetAgent = "Orchestrator"
-            }
+			if msg.RouteTarget != "" && msg.RouteTarget != m.Name() {
+				// If a route_target is specified, go directly there
+				targetAgent = msg.RouteTarget
+			} else if msg.Role == "user" {
+				// User initial message, route to orchestrator and also append to history
+				utils.Logger.Debug().Msg("Routing initial user message to Orchestrator")
+				targetAgent = "Orchestrator"
+				m.appendHistory(msg) // Store user message in history as first entry
+			} else {
+				// Fallback: orchestrator decides
+				targetAgent = "Orchestrator"
+			}
 
-            utils.Logger.Debug().Str("target", targetAgent).Msgf("---> Routing to %s", targetAgent)
-            m.SendToAgent(targetAgent, msg)
-            resp := <-m.AgentOutputChan(targetAgent)
-            preview := resp.Content
-            if len(preview) > 10 {
-                preview = preview[:min(50, len(preview))]
-            }
-            utils.Logger.Debug().Str("sender", resp.OriginAgent).Msgf("Manager received output response from %s: %s", targetAgent, preview)
-            m.appendHistory(resp)
+			utils.Logger.Debug().Str("target", targetAgent).Msgf("---> Routing to %s", targetAgent)
+			m.SendToAgent(targetAgent, msg)
+			resp := <-m.AgentOutputChan(targetAgent)
+			preview := resp.Content
+			if len(preview) > 10 {
+				preview = preview[:min(50, len(preview))]
+			}
+			utils.Logger.Debug().Str("sender", resp.OriginAgent).Msgf("Manager received output response from %s: %s", targetAgent, preview)
+			m.appendHistory(resp)
 
-            // *** Now, handle reply chaining ***
-            if resp.RouteTarget != "" && resp.RouteTarget != m.Name() {
-                utils.Logger.Debug().Str("next_agent", resp.RouteTarget).Msgf("Forwarding response to next agent: %s", resp.RouteTarget)
-                // Before: m.input <- resp
-                if resp.Context == nil {
-                    resp.Context = map[string]interface{}{}
-                }
+			// *** Now, handle reply chaining ***
+			if resp.RouteTarget != "" && resp.RouteTarget != m.Name() {
+				utils.Logger.Debug().Str("next_agent", resp.RouteTarget).Msgf("Forwarding response to next agent: %s", resp.RouteTarget)
+				if resp.Context == nil {
+					resp.Context = map[string]interface{}{}
+				}
+				// Remove history injection - agents will request it from manager instead
+				// History stays centralized in manager to avoid duplication
 
-				// resp.Context = filterContextForNext(resp.Context)
-                // --- FLATTEN before setting! ---
-	            // resp.Context["history"] = model.FlattenHistory(m.history) // inject up-to-date history
-				resp.Context["history"] = BuildChatHistoryForManager(m.history) // Flat, no recursion!
-	
-                // Forward immediately to next agent
-                m.input <- resp // enqueue next step
-            } else {
-                utils.Logger.Debug().Msg("No next agent specified, finalizing response")
-                m.output <- resp // finally output if no next step
-            }
-        }
+				// Forward immediately to next agent
+				m.input <- resp // enqueue next step
+			} else {
+				utils.Logger.Debug().Msg("No next agent specified, finalizing response")
+				m.output <- resp // finally output if no next step
+			}
+		}
 	}()
 }
 func (m *ChatManager) appendHistory(msg model.AgentMessage) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.history = append(m.history, msg)
+}
+
+// Add method to get history on demand
+func (m *ChatManager) GetHistory() []model.AgentMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return BuildChatHistoryForManager(m.history)
+}
+
+// Add method to get history for specific agent (with filtering if needed)
+func (m *ChatManager) GetHistoryForAgent(agentName string) []model.AgentMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	history := BuildChatHistoryForManager(m.history)
+	// Optional: filter history relevant to this agent
+	return history
 }
 
 // Helper for manager (like BuildChatHistory above)

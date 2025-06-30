@@ -4,6 +4,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+
 	"aiupstart.com/go-gen/internal/llm"
 	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/model"
@@ -96,12 +97,12 @@ func (o *OrchestratorAgent) Start(input <-chan model.AgentMessage, output chan<-
 			nextRole, found := o.workflow[currRole]
 			if found {
 				routeMsg := model.AgentMessage{
-					Role:       model.RoleOrchestrator,
-					Type:       model.TypeRoute,
-					Sender:     o.name,
-					Content:    msg.Content, // fmt.Sprintf("Routing from role %s to role %s as per workflow", currRole, nextRole),
+					Role:        model.RoleOrchestrator,
+					Type:        model.TypeRoute,
+					Sender:      o.name,
+					Content:     msg.Content, // fmt.Sprintf("Routing from role %s to role %s as per workflow", currRole, nextRole),
 					RouteTarget: nextRole,
-					Context:    cloneContext(msg.Context),
+					Context:     cloneContext(msg.Context),
 					OriginAgent: o.name,
 				}
 
@@ -120,7 +121,7 @@ func (o *OrchestratorAgent) Start(input <-chan model.AgentMessage, output chan<-
 				agentListStr += fmt.Sprintf("- %s\t%s\n", a.Name(), a.Description())
 			}
 
-			history := o.manager.history
+			history := o.manager.GetHistory()
 			latestMsg := model.SafeJSON(msg)
 			historyJSON := model.SafeJSON(history)
 			prompt := fmt.Sprintf(

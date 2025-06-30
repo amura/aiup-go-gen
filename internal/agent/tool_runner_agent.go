@@ -10,27 +10,27 @@ import (
 )
 
 type ToolRunnerAgent struct {
-	name     string
-	description string
-	registry *tools.ToolRegistry
-	dockerExecTool * tools.DockerExecTool
+	name           string
+	description    string
+	registry       *tools.ToolRegistry
+	dockerExecTool *tools.DockerExecTool
 }
 
 func NewToolRunnerAgent(name string, registry *tools.ToolRegistry) *ToolRunnerAgent {
 	return &ToolRunnerAgent{name: name, registry: registry}
 }
-func (a *ToolRunnerAgent) Name() string { return a.name }
+func (a *ToolRunnerAgent) Name() string        { return a.name }
 func (a *ToolRunnerAgent) Description() string { return a.description }
 func (a *ToolRunnerAgent) SetDescription(desc string) {
 	a.description = desc
 }
 func (a *ToolRunnerAgent) CleanupContainer(ctx context.Context) error {
-    if a.dockerExecTool != nil {
-        utils.Logger.Info().Str("agent", a.name).Msg("Cleaning up DockerExecTool container")
-        return a.dockerExecTool.CleanupContainer(ctx)
-    }
-    utils.Logger.Warn().Str("agent", a.name).Msg("No DockerExecTool to cleanup")
-    return nil
+	if a.dockerExecTool != nil {
+		utils.Logger.Info().Str("agent", a.name).Msg("Cleaning up DockerExecTool container")
+		return a.dockerExecTool.CleanupContainer(ctx)
+	}
+	utils.Logger.Warn().Str("agent", a.name).Msg("No DockerExecTool to cleanup")
+	return nil
 }
 
 func (a *ToolRunnerAgent) Start(input <-chan model.AgentMessage, output chan<- model.AgentMessage) {
@@ -65,12 +65,17 @@ func (a *ToolRunnerAgent) Start(input <-chan model.AgentMessage, output chan<- m
 				}
 
 				// Always route result back to the original caller (assistant, etc)
+				var errorMsg string
+				if result.Error != nil {
+					errorMsg = result.Error.Error()
+				}
+
 				output <- model.AgentMessage{
-					Role:          "tool",
-					Sender:        a.name,
-					Content:       fmt.Sprintf("%v", result.Output),
-					Type:          model.TypeToolResult,
-					RouteTarget:   msg.ToolCall.Caller, // Dynamic! E.g. "assistant"
+					Role:        "tool",
+					Sender:      a.name,
+					Content:     fmt.Sprintf("%v", result.Output),
+					Type:        model.TypeToolResult,
+					RouteTarget: msg.ToolCall.Caller, // Dynamic! E.g. "assistant"
 					ErrorDetail: &model.ErrorDetail{
 						Phase:   "tool_call",
 						Command: msg.ToolCall.Name,
@@ -80,9 +85,9 @@ func (a *ToolRunnerAgent) Start(input <-chan model.AgentMessage, output chan<- m
 					OriginAgent:   msg.Sender,
 					OriginContent: msg.Content,
 					Context:       ctx,
-					ToolCall: msg.ToolCall,
-					ToolCallID: msg.ToolCall.ID,
-					ToolResult:    &model.ToolResult{Output: result.Output, Error: result.Error.Error()},
+					ToolCall:      msg.ToolCall,
+					ToolCallID:    msg.ToolCall.ID,
+					ToolResult:    &model.ToolResult{Output: result.Output, Error: errorMsg},
 				}
 			} else {
 				utils.Logger.Warn().

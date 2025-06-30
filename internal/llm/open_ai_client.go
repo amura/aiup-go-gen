@@ -190,6 +190,8 @@ func (c *OpenAILLMClient) Generate(history []model.AgentMessage, prompt string) 
 		Messages:   messages,
 		Tools:      c.tools,
 		ToolChoice: "auto",
+		Temperature: 0, // Make output deterministic!
+
 	}
 
 	resp, err := c.client.CreateChatCompletion(context.Background(), req)

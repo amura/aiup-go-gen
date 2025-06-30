@@ -44,6 +44,8 @@ type AgentMessage struct {
 	Tokens      *int                   `json:"tokens,omitempty"`
 	ErrorDetail *ErrorDetail           `json:"error_detail,omitempty"`
 	Context     map[string]interface{} `json:"context,omitempty"`
+	Success     bool                   `json:"success,omitempty"` // Indicates if the message was processed successfully
+	CodeBlocks  []string               `json:"code_blocks,omitempty"` // List of code blocks in the message
 }
 
 // type ToolCall struct {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,15 +18,15 @@ import (
 )
 
 const (
-    RoleAssistant = "assistant"
-    RoleUx = "ux"
-    // ...
+	RoleAssistant = "assistant"
+	RoleUx        = "ux"
+	// ...
 )
 
 func main() {
 	// utils.Logger.Debug().Str("module", "main").Msg("Starting AIUpStart Playground")
 
-	ux_prompt :=`
+	ux_prompt := `
 Your role:
 - Leverage user-centered design principles, standard usability heuristics, and industry best practices to produce clear, intuitive wireframes.
 - Adhere to design guidelines around layout, navigation, and consistency. Favor a top navigation bar, optionally sub-menus on the left, and a fixed footer at the bottom.
@@ -76,18 +77,21 @@ NB. Do not ask user any questions or request any feedback, the coding agent will
 
 `
 
-execToolName :=  "docker_exec" //"docker_exec"
+	execToolName := "docker_exec" //"docker_exec"
 
 ui_coder_prompt := fmt.Sprintf(`
 
+You have access to the Angular CLI tools to create and modify Angular web applications based on the user request.
+
 ## Task
 - You receive a user request to create for an Angular project.
-- The UX agent will provide wireframes for you to follow which go with the user request.
+- The UX agent will provide wireframes for you to follow closely which go with the user request.
 - Code a secure Web application that meets the request.
-- Using mainly the angular cli tool available, provide all necessary files (components, services, pipes, etc.) following best angular practices, placing each code file in separate code blocks as per the tool
+- Using mainly the angular cli tool available, use ng create .., and then provide all necessary files (components, services, pipes, etc.) following best angular practices, placing each code file in separate code blocks as per the tool
 - Where interaction with an API is required, use environment variables for the API base URL, and use mocks for the API calls when executing the code.
 - Wait for the %s executor to report success or failure of launching the web app, and fix any errors or warnings accordingly.
 - Keep your comments or reasoning explanatory text to absolute minimum.
+- When generating shell or CLI commands, you must always include flags that ensure NO user interaction or prompts (for example, use "--no-interactive" and "--defaults" for Angular CLI commands). Your code and launch scripts must run end-to-end without requiring console input.
 - You must ensure the site uses SSL certificates and is secure by default.
 - You must attempt to launch the web app once it has built using ng serve, and report any errors or warnings to the user.
 
@@ -101,6 +105,19 @@ ui_coder_prompt := fmt.Sprintf(`
 - Always use typescript for all code files, bootstrap for styling and or angular material for components
 - If more complex components are required, use the angular schematics to generate them or go for primeNg components
 
+## Angular rules
+- Use standalone components
+- Use --skip-confirmation to bypass any prompts, e.g npm run ng add @angular/pwa -- --skip-confirmation
+- Use --skip-git to skip git initialization, e.g. ng new my-app --skip-git
+- Use --no-interactive
+- On install use options e.g npm install --silent --no-audit --no-fund
+- Use scss for styling
+- Use the latest Angular version available
+- Use the latest Angular CLI version available
+- Use the latest Angular Material version available
+- Use the latest PrimeNG version available
+- Use latest bootstrap version available
+
 ## Services
 - Implement a service layer for business logic or data-access code where necessary.
 - Implement adequate error handling
@@ -113,12 +130,44 @@ ui_coder_prompt := fmt.Sprintf(`
 - For any '.sh' file you generate, always add 'chmod +x <filename>.sh' (e.g., 'chmod +x launch.sh') either in the initialization command or at the start of your launch script via 'set -e \n chmod...'.
 - The launch command should never fail due to permission errors.
 
+The following file structure must be strictly followed:
+workspace/
+|── launch.sh    // Required: script to launch the angular application with +x permissions, at the root level
+|── init.sh   // Required: Script to init the angular application with +x permissions, at the root level
+├── README.md
+├── .editorconfig
+├── .gitignore
+├── angular.json
+├── package.json // required with all dependencies
+├── tsconfig.json
+├── .browserslistrc
+├── karma.conf.js
+├── tsconfig.app.json  // required for Angular CLI
+└── src/
+    ├── favicon.ico
+    ├── index.html
+    ├── main.ts
+    ├── polyfills.ts
+    ├── styles.css
+    ├── test.ts
+    ├── assets/
+    │   └── .gitkeep
+    ├── environments/
+    │   ├── environment.prod.ts
+    │   └── environment.ts
+    └── app/
+        ├── app.module.ts
+        ├── app.component.css
+        ├── app.component.html
+        ├── app.component.spec.ts
+        └── app.component.ts
+
 ## Additonal text in output
 - When including any extra comments or chain of thought reasoning whilst resolving issues, this must only be included in the following format:
 
-	###BEGIN_LLM_COMMENTS
+	BEGIN_LLM_COMMENTS
 	Your comments or notes here, in plain text.
-	###END_LLM_COMMENTS
+	END_LLM_COMMENTS
 
 - Do not include these boundary markers in any other context. Do not reveal hidden chain-of-thought outside these markers.
 
@@ -133,24 +182,36 @@ Use the following environment variables where needed:
 	API_BASE_URL
 
 ## Error Flow
-- If the %s executor indicates an error (non-zero exit code), revise the entire code
+- If the %s executor indicates an error (non-zero exit code that is not a timeout 124 code), review the error message and fix the code accordingly.
+- If the error is related to the code generation, fix the code and re-run the executor.
 
-For all code execution or bug fixing, use the %s tool.
-For multi-file outputs, provide code_blocks as an array of objects.
-Each object should have:
-- language: file language (e.g. python, bash, typescript)
-- filename: e.g. service.ts
-- code: the code/content as a string
+## Success criteria
+You must consider the execution a success following a run of launch.sh when
+The output from the executor includes:
+- Application bundle generation completed successfully
+- Local launch url e.g. "Local: http://localhost:.."
+- Followed by a message about command timeout, and or 'exit status code 124' 
 
-You must pass in the dockerfile content inside the docker_file parameter which can be used to setup an image that will have all the required dependencies installed and configured
+## Output
+*Output is invalid if neither tool call provided and or JSON object is returned *
+- When tool usage required:
+	For all code execution or bug fixing, use the %s tool.
+	For multi-file outputs, provide code_blocks as an array of objects.
+	Each object should have:
+		- language: file language (e.g. python, bash, typescript)
+		- filename: e.g. service.ts
+		- code: the code/content as a string
+	- You must pass in the dockerfile content inside the docker_file parameter which can be used to setup an image that will have all the required dependencies installed and configured
+	- Do not output code as plain strings or markdown—always use this structure for tool calls.
+	- Do not emit code, tool calls, or JSON directly in your message content. Only use tool calls for execution.
+	- Any command timeout should be set about max 90 seconds
 
-Do not output code as plain strings or markdown—always use this structure for tool calls.
-
-Do not emit code, tool calls, or JSON directly in your message content. Only use tool calls for execution.
-
-When generating shell or CLI commands, you must always include flags that ensure NO user interaction or prompts (for example, use "--no-interactive" and "--defaults" for Angular CLI commands). Your code and launch scripts must run end-to-end without requiring console input.
-
-Otherwise, reply with your answer directly.
+- Following successful code execution and app launch, or a command timeout following a launch on localhost, then just return final code generated:
+	- Output JSON object only with the following structure
+	{{
+		"content": "A brief summary of the code changes made, e.g. 'Added login component and service for user authentication.'",
+		"success": true
+	}}
 
 `, execToolName, execToolName, execToolName)
 
@@ -190,18 +251,18 @@ Otherwise, reply with your answer directly.
 	// --- OpenAI client and tools ---
 	// oaClient := openai.NewClient(apiKey)
 	openAITools := llm.BuildOpenAIToolsFromConfig(mcp_cfg)
-	llmClient := llm.NewOpenAILLMClient(apiKey,"gpt-4o", openAITools)
+	llmClient := llm.NewOpenAILLMClient(apiKey, "gpt-4o", openAITools)
 
-	
 	if execToolName == "docker_exec" {
 
-		newDockerExec := tools.NewDockerExecTool("go-gen-", "angular-dev:latest")
+		newDockerExec := tools.NewDockerExecTool("go-gen", "angular-dev:latest")
 		registry.Register(newDockerExec)
+
+		newDockerExec.CleanupAllContainersWithPrefix(context.Background())
 	}
 
-
 	daggerConfig := tools.DaggerExecConfig{
-		Image:         "",  // need to update to include file path to Dockerfile
+		Image:         "", // need to update to include file path to Dockerfile
 		Workdir:       "/src",
 		MountPath:     "/src",
 		OutputPath:    "/src/dist",
@@ -221,16 +282,15 @@ Otherwise, reply with your answer directly.
 		registry.Register(daggerExec)
 	}
 
-
 	// Put your actual prompt strings here, or load from file/config.
 	// ui_coder_prompt := "You are a coding agent. ..." // <--- put your actual UI coder prompt here
 	// ux_prompt := "You are a UX agent. ..."          // <--- put your actual UX agent prompt here
 
-	// --- Agents ---
-	assistant := agent.NewAssistantAgent("assistant", RoleAssistant, llmClient, "You are the Assistant Agent responsible for coding a angular SPA acting on a user request", ui_coder_prompt, registry)
+	// --- Create agents with nil history provider initially ---
+	assistant := agent.NewAssistantAgent("assistant", RoleAssistant, llmClient, "You are the Assistant Agent responsible for coding a angular SPA acting on a user request", ui_coder_prompt, registry, nil)
 	assistant.SetDescription("UI Coding assistant")
 
-	ux_assistant := agent.NewAssistantAgent("ux", RoleUx, llmClient, "You are an experienced 'UX Design Expert' agent.", ux_prompt, nil)
+	ux_assistant := agent.NewAssistantAgent("ux", RoleUx, llmClient, "You are an experienced 'UX Design Expert' agent.", ux_prompt, nil, nil)
 	ux_assistant.SetDescription("UX wireframe assistant")
 
 	toolRunner := agent.NewToolRunnerAgent("toolrunner", registry)
@@ -238,16 +298,20 @@ Otherwise, reply with your answer directly.
 
 	// --- Orchestrator/Manager setup ---
 	workflow := map[string]string{
-    "user": "ux",
-    "ux": "assistant",
-    "assistant": "tool",
-    "tool": "assistant",
-}
+		"user":      "ux",
+		"ux":        "assistant",
+		"assistant": "tool",
+		"tool":      "assistant",
+	}
 	var manager *agent.ChatManager
 	orchestrator := agent.NewOrchestratorAgent("Orchestrator", manager, agents, llmClient, workflow)
 	agentListWithOrch := append([]agent.Agent{orchestrator}, agents...)
 	manager = agent.NewChatManager(agentListWithOrch)
 	orchestrator.SetManager(manager)
+
+	// Update assistant agents with the manager as history provider
+	assistant.SetHistoryProvider(manager)
+	ux_assistant.SetHistoryProvider(manager)
 
 	// Ensure cleanup of docker containers on exit
 	defer func() {
@@ -263,7 +327,7 @@ Otherwise, reply with your answer directly.
 	first := model.AgentMessage{
 		Role:    model.RoleUser,
 		Sender:  "User",
-		Content: "Create a new angular web app which has a main user login page.",
+		Content: "Create a new angular web app which has a main user login page. This should take in user name and password",
 	}
 	manager.Start()
 
