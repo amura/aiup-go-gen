@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/model"
 	"aiupstart.com/go-gen/internal/tools"
 	"aiupstart.com/go-gen/internal/utils"
@@ -33,7 +34,73 @@ func (a *ToolRunnerAgent) CleanupContainer(ctx context.Context) error {
 	return nil
 }
 
+
 func (a *ToolRunnerAgent) Start(input <-chan model.AgentMessage, output chan<- model.AgentMessage) {
+	go func() {
+		for msg := range input {
+			utils.Logger.Debug().
+				Str("agent", a.name).
+				Str("event", "received_message").
+				Msgf("Received: %s", msg.Content)
+			utils.LogContext(msg.Context, "ToolRunner received context")
+
+			ctx := msg.Context
+			if ctx == nil {
+				ctx = map[string]interface{}{}
+			}
+
+			// Only respond to tool calls with a valid ToolCall struct
+			if msg.Type == model.TypeToolCall && msg.ToolCall != nil {
+				// Record metrics
+				metrics.ToolCallsTotal.WithLabelValues(msg.ToolCall.Name, msg.ToolCall.Caller).Inc()
+				// Actually invoke the tool
+				result := a.registry.Call(context.TODO(), *msg.ToolCall)
+				utils.Logger.Debug().
+					Str("agent", a.name).
+					Str("tool", msg.ToolCall.Name).
+					Msgf("Tool call result:\n\n  %v \n\n", result.Output)
+
+				// Build the new message — keep original tool_call and propagate error details
+				newMsg := model.AgentMessage{
+					Sender:        a.name,
+					Role:          "tool",
+					Type:          model.TypeToolResult,
+					Content:       fmt.Sprintf("%v", result.Output),
+					RouteTarget:   msg.ToolCall.Caller, // Dynamic! Use original caller, not hardcoded.
+					Context:       ctx,
+					ToolCall:      msg.ToolCall,        // <-- Pass along original ToolCall for correct OpenAI tool call ID flow.
+					ToolCallID:    msg.ToolCallID,	 // <-- Pass along ToolCall ID for tracking
+					ToolResult:    &model.ToolResult{Output: result.Output, Error: result.ErrorMsg},             // <-- Attach result (can be nil or error)
+					OriginAgent:   msg.OriginAgent,
+					OriginContent: msg.OriginContent,
+					ErrorDetail: &model.ErrorDetail{
+						Phase:   "tool_call",
+						Command: msg.ToolCall.Name,
+						Output:  fmt.Sprintf("%v", result.Output),
+						ErrMsg:  fmt.Sprintf("%v", result.Error),
+					},
+				}
+
+				// Add all relevant error info to context for the assistant LLM retry
+				if result.Error != nil {
+					ctx["tool_error"] = result.Output
+					ctx["tool_error_detail"] = result.Error.Error()
+					ctx["tool_phase"] = "tool_call"
+					ctx["tool_name"] = msg.ToolCall.Name
+					ctx["tool_id"] = msg.ToolCall.ID
+				}
+
+				output <- newMsg
+			} else {
+				utils.Logger.Warn().
+					Str("agent", a.name).
+					Msgf("Received non-tool call message: %s", msg.Content)
+			}
+		}
+	}()
+}
+
+func (a *ToolRunnerAgent) Start2(input <-chan model.AgentMessage, output chan<- model.AgentMessage) {
 	go func() {
 		for msg := range input {
 			utils.Logger.Debug().

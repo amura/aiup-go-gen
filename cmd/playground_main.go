@@ -28,6 +28,10 @@ func main() {
 
 	ux_prompt := `
 Your role:
+
+You are an experienced 'UX Design Expert' agent. Your task is to create wireframes for web applications based on user requests. You will produce text-based wireframes that can be easily interpreted by other agents or developers.
+
+Your Responsibilities:
 - Leverage user-centered design principles, standard usability heuristics, and industry best practices to produce clear, intuitive wireframes.
 - Adhere to design guidelines around layout, navigation, and consistency. Favor a top navigation bar, optionally sub-menus on the left, and a fixed footer at the bottom.
 - You do not generate any code as that is delegated to another ui coding agent.
@@ -123,15 +127,16 @@ You have access to the Angular CLI tools to create and modify Angular web applic
 - Implement adequate error handling
 
 ## Fenced Code Output
-- Output each file in its own fenced code block.
+- Output each file in its own code block.
 - Do not mix multiple files into one code block.
+- Generate an init.sh bash script to initialize the angular application.
 - Generate a launch.sh bash script to launch the angular application.
 - *Always output the launch.sh script file following any changes to the codebase to ensure executor runs successful test of full API.*
 - For any '.sh' file you generate, always add 'chmod +x <filename>.sh' (e.g., 'chmod +x launch.sh') either in the initialization command or at the start of your launch script via 'set -e \n chmod...'.
 - The launch command should never fail due to permission errors.
 
 The following file structure must be strictly followed:
-workspace/
+.
 |── launch.sh    // Required: script to launch the angular application with +x permissions, at the root level
 |── init.sh   // Required: Script to init the angular application with +x permissions, at the root level
 ├── README.md
@@ -204,7 +209,7 @@ The output from the executor includes:
 	- You must pass in the dockerfile content inside the docker_file parameter which can be used to setup an image that will have all the required dependencies installed and configured
 	- Do not output code as plain strings or markdown—always use this structure for tool calls.
 	- Do not emit code, tool calls, or JSON directly in your message content. Only use tool calls for execution.
-	- Any command timeout should be set about max 90 seconds
+	- Any command timeout should be set about  120 seconds
 
 - Following successful code execution and app launch, or a command timeout following a launch on localhost, then just return final code generated:
 	- Output JSON object only with the following structure
@@ -251,7 +256,7 @@ The output from the executor includes:
 	// --- OpenAI client and tools ---
 	// oaClient := openai.NewClient(apiKey)
 	openAITools := llm.BuildOpenAIToolsFromConfig(mcp_cfg)
-	llmClient := llm.NewOpenAILLMClient(apiKey, "gpt-4o", openAITools)
+	llmClient := llm.NewOpenAILLMClient(apiKey, "gpt-4.1", openAITools)
 
 	if execToolName == "docker_exec" {
 
@@ -287,10 +292,11 @@ The output from the executor includes:
 	// ux_prompt := "You are a UX agent. ..."          // <--- put your actual UX agent prompt here
 
 	// --- Create agents with nil history provider initially ---
-	assistant := agent.NewAssistantAgent("assistant", RoleAssistant, llmClient, "You are the Assistant Agent responsible for coding a angular SPA acting on a user request", ui_coder_prompt, registry, nil)
+	assistant := agent.NewAssistantAgent("assistant", RoleAssistant, llmClient, "You are the Assistant Agent responsible for coding a angular SPA acting on a user request", 
+	ui_coder_prompt, nil, registry, nil)
 	assistant.SetDescription("UI Coding assistant")
 
-	ux_assistant := agent.NewAssistantAgent("ux", RoleUx, llmClient, "You are an experienced 'UX Design Expert' agent.", ux_prompt, nil, nil)
+	ux_assistant := agent.NewAssistantAgent("ux", RoleUx, llmClient, "You are an experienced 'UX Design Expert' agent.", ux_prompt, nil, nil, nil)
 	ux_assistant.SetDescription("UX wireframe assistant")
 
 	toolRunner := agent.NewToolRunnerAgent("toolrunner", registry)

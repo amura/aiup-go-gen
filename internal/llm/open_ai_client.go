@@ -167,7 +167,7 @@ func encodeArgs(args map[string]interface{}) string {
 }
 
 // Generate: takes full chat history, prompt, and calls OpenAI
-func (c *OpenAILLMClient) Generate(history []model.AgentMessage, prompt string) (LLMResponse, error) {
+func (c *OpenAILLMClient) Generate(history []model.AgentMessage, prompt string, enableTools bool) (LLMResponse, error) {
 	utils.Logger.Debug().Str("module", "llm").Msgf("Sending request to OpenAI model for prompt: \n%s\n", prompt)
 
 	var messages []openai.ChatCompletionMessage
@@ -186,17 +186,23 @@ func (c *OpenAILLMClient) Generate(history []model.AgentMessage, prompt string) 
 	}
 
 	req := openai.ChatCompletionRequest{
-		Model:      c.model,
-		Messages:   messages,
-		Tools:      c.tools,
-		ToolChoice: "auto",
+		Model:       c.model,
+		Messages:    messages,
 		Temperature: 0, // Make output deterministic!
+	}
 
+	if enableTools && len(c.tools) > 0 {
+		req.Tools = c.tools
+		req.ToolChoice = "auto"
 	}
 
 	resp, err := c.client.CreateChatCompletion(context.Background(), req)
 	if err != nil {
 		utils.Logger.Error().Err(err).Str("module", "llm").Msg("Failed to generate response from OpenAI")
+		// log out all the messages for debugging
+		for i, msg := range messages {
+			utils.Logger.Debug().Str("module", "llm").Msgf("\n Message %d: Role=%s, Content=%s", i, msg.Role, msg.Content)
+		}
 		return LLMResponse{}, fmt.Errorf("OpenAI API error: %w", err)
 	}
 
@@ -211,10 +217,10 @@ func (c *OpenAILLMClient) Generate(history []model.AgentMessage, prompt string) 
 		return LLMResponse{}, fmt.Errorf("no choices returned from OpenAI API")
 	}
 	msg := resp.Choices[0].Message
-    preview := msg.Content
-    if len(preview) > 10 {
-            preview = preview[:10]
-        }
+	preview := msg.Content
+	if len(preview) > 10 {
+		preview = preview[:10]
+	}
 	utils.Logger.Debug().Str("module", "llm").Msgf("OpenAI response received: %s", preview) // Log first 100 chars
 
 	// Parse tool calls if present

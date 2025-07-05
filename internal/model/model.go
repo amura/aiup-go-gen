@@ -35,6 +35,8 @@ type AgentMessage struct {
 	Sender        string                   `json:"sender"`
 	Type        MessageType            `json:"type"`
 	Content     string                 `json:"content,omitempty"`
+	// FunctionName string                 `json:"function_name,omitempty"` // Name of the function call, if applicable
+	FunctionID  string                 `json:"function_id,omitempty"` // ID of the function call, if applicable
 	ToolCall    *common.ToolCall              `json:"tool_call,omitempty"`
 	ToolCallID  string                 `json:"call_id,omitempty"` // ID of the tool call, if applicable
 	ToolResult  *ToolResult            `json:"tool_result,omitempty"`
@@ -46,6 +48,14 @@ type AgentMessage struct {
 	Context     map[string]interface{} `json:"context,omitempty"`
 	Success     bool                   `json:"success,omitempty"` // Indicates if the message was processed successfully
 	CodeBlocks  []string               `json:"code_blocks,omitempty"` // List of code blocks in the message
+
+// 	{
+//     "type": "function_call",
+//     "id": "fc_12345xyz",
+//     "call_id": "call_12345xyz",
+//     "name": "get_weather",
+//     "arguments": "{\"location\":\"Paris, France\"}"
+// }
 }
 
 // type ToolCall struct {

@@ -20,7 +20,7 @@ type LLMResponse struct {
 
 // LLMClient interface
 type LLMClient interface {
-	Generate(history []model.AgentMessage, prompt string) (LLMResponse, error)
+	Generate(history []model.AgentMessage, prompt string,enableTools bool) (LLMResponse, error)
 }
 
 // // LLMClient defines the interface for all LLM backends.

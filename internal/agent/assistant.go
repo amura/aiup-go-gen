@@ -27,7 +27,7 @@ You must pass in the dockerfile content inside the docker_file parameter which c
 
 Do not output code as plain strings or markdown—always use this structure for tool calls.
 
-Do not emit code, tool calls, or JSON directly in your message content. Only use tool calls for execution.
+Do not emit code or tool calls, or JSON directly in your message content. Only use tool calls for execution.
 
 When generating shell or CLI commands, you must always include flags that ensure NO user interaction or prompts (for example, use "--no-interactive" and "--defaults" for Angular CLI commands). Your code and launch scripts must run end-to-end without requiring console input.
 
@@ -42,25 +42,31 @@ You are an AI coding assistant with expertise in software development, debugging
 
 const outputInstructions = `
 
-* IMPORTANT: If you produce a reply, you MUST reply only in strict JSON. Output nothing else, nor do not include any leading text or comments. Just return valid JSON objects:
+* IMPORTANT: You MUST reply only in strict JSON Output with nothing else using format that can be unmarshal into JSON in 'go' langu©age, or output tool calls with required parameters:
 N.B Do not use any backticks or T_B_T as this will be marshalled as a string in the JSON using 'Go', so string content must be compatible.
 
-Format your output like this json object:
-{
-	"role": "ux",
-	"type": "wireframe",
-	"content": "ASCII wireframe and explanation here, without any T_B_T", 
-	"route_target": "assistant"
-}
-	
-Ensure this output is valid JSON:
-- You must escape all newlines embedded in the content as \n 
-- Replace or encode any strange characters such as backticks, so that it can be easily parsed in Go.
-- Do not use any other format or free text, only valid JSON objects.
+** You only produce 2 types of output:
+1. When response does not require tool usage, output JSON objects with role, type, content, and other fields as required. Do not output any other text or comments, just valid JSON.
+	You must respond strictly according to the provided rules. Your response must fit precisely into this JSON format :
+	{
+		"role": "ux",
+		"type": "wireframe",
+		"content": "ASCII wireframe and explanation here, without any T_B_T", // Include e.g. ASCII wireframe and clear explanation inside the "content" field only, formatted strictly as specified.
+		"route_target": "assistant"
+	}
+    ** NB Do not insert any leading T_B_T JSON or other comments ahead of this JSON block, or that invalidates the output.
+	Do not output anything other than this strictly formatted JSON object.
 
+		
+	Ensure this output is valid JSON:
+	- You must escape all newlines embedded in the content as \n 
+	- Replace or encode any strange characters such as backticks, so that it can be easily parsed in Go.
+	- Do not use any other format or free text, only valid JSON objects.
+	- * Do not proceed this json block with any other leading test such as T_B_T json or other comments, just output strict JSON only*
 
-*	Use type: "tool_call" and set "route_target": "toolrunner" when code execution is needed.
-*	Only return with no route_target if the process is fully done.
+2. When you need to call a tool, produce tool output
+	*	Use type: "tool_call" and set "route_target": "toolrunner" when code execution is needed.
+	*	Only return with no route_target if the process is fully done.
 
 `
 
@@ -80,11 +86,13 @@ type AssistantAgent struct {
 	persona         string
 	toolRegistry    *tools.ToolRegistry
 	promptOverload  string // If present, overloads the default prompt template.
+	promptBuilder  func(model.AgentMessage) string
 	toolAgentPrompt map[string]interface{}
 	historyProvider HistoryProvider // Add history provider reference
 }
 
-func NewAssistantAgent(name string, role string, llmClient llm.LLMClient, persona string, promptOverload string, registry *tools.ToolRegistry, historyProvider HistoryProvider) *AssistantAgent {
+func NewAssistantAgent(name string, role string, llmClient llm.LLMClient, persona string, promptOverload string, 
+		promptBuilder func(model.AgentMessage) string, registry *tools.ToolRegistry, historyProvider HistoryProvider) *AssistantAgent {
 	return &AssistantAgent{
 		name:            name,
 		role:            role,
@@ -92,6 +100,7 @@ func NewAssistantAgent(name string, role string, llmClient llm.LLMClient, person
 		toolRegistry:    registry,
 		persona:         persona,
 		promptOverload:  promptOverload,
+		promptBuilder:   promptBuilder,
 		toolAgentPrompt: make(map[string]interface{}), // Initialize as nil, will be set when tool calls are made
 		historyProvider: historyProvider,
 	}
@@ -122,86 +131,270 @@ func (a *AssistantAgent) Start(input <-chan model.AgentMessage, output chan<- mo
 			utils.Logger.Debug().
 				Str("agent", a.name).
 				Str("event", "received_message").
-				Msgf("Received message from : %s", msg.Sender)
+				Msgf("Received message from: %s", msg.Sender)
 
 			metrics.AgentMessagesTotal.WithLabelValues(a.name).Inc()
 			// utils.LogContext(msg.Context, "Assistant input context")
-			// Log only context keys, not full value, to avoid recursive dump
-			if msg.Context != nil {
-				keys := make([]string, 0, len(msg.Context))
-				for k := range msg.Context {
-					keys = append(keys, k)
-				}
-				utils.Logger.Debug().Strs("ctx_keys", keys).Msg("Assistant input context keys")
+
+			// --- 1. Prepare prompt ---
+		    prompt := a.buildUpPrompt(msg.Content) // Use the local buildUpPrompt method
+			// if a.promptOverload != "" {
+			// 	prompt = a.promptOverload
+			// 	utils.Logger.Debug().Msg("Using prompt override for AssistantAgent")
+			// } else {
+			// 	// Use default template, inject persona/tools, user request
+			// 	// prompt = fmt.Sprintf(
+			// 	// 	strings.ReplaceAll(assistantPromptTemplate, "T_B_T", "```"),
+			// 	// 	a.personaOrDefault(),
+			// 	// 	defaultPrompt,
+			// 	// 	a.toolRegistry.DescribeTools(),
+			// 	// 	msg.Content,
+			// 	// )
+			// 	prompt = a.buildUpPrompt(msg.Content) // Use the local buildUpPrompt method
+			// }
+
+			// --- 2. Inject tool error details into the prompt if present ---
+			prompt = injectError(msg, prompt) // (helper function provided elsewhere; should append error detail if present)
+
+			utils.Logger.Debug().
+				Str("agent", a.name).
+				Msgf("About to call llm with prompt: %s", prompt[:min(100, len(prompt))])
+
+			// --- 3. Collect "history" for LLM. This is now always in msg.Context["history"] if present ---
+			var history []model.AgentMessage
+			// Manager is responsible for keeping/forwarding the full message array, minus orchestrator if needed.
+			if h, ok := msg.Context["history"].([]model.AgentMessage); ok && len(h) > 0 {
+				history = filterOutOrchestratorMessages(h) // See helper below
+			} else {
+				history = []model.AgentMessage{msg}
 			}
 
-			prompt := ""
-			history := []model.AgentMessage{}
+			// --- 4. Call LLM ---
+			filteredHistory := filterAgentHistory(history)
+			llmResp, err := a.llmClient.Generate(filteredHistory, prompt, true)
+			if err != nil {
+				utils.Logger.Error().Err(err).Msgf("LLM generation error")
+				output <- model.AgentMessage{
+					Role:    model.RoleAssistant,
+					Type:    model.TypeError,
+					Content: "[LLM ERROR] " + err.Error(),
+					Context: filterContextForNext(msg.Context),
+				}
+				continue
+			}
+			utils.Logger.Debug().Str("llm_response", fmt.Sprintf("%v", len(llmResp.Content))).Msg("LLM response received!!")
 
-			if msg.ErrorDetail != nil && msg.ErrorDetail.Phase == "tool_call" {
-				// If this is a tool call error, we need to handle it
-				utils.Logger.Error().
-					Str("agent", a.name).
-					Msgf("Tool call error: %s", msg.ErrorDetail.ErrMsg)
-
-				// get previous prompt and append the error details
-				if toolID, ok := msg.Context["tool_id"].(string); ok && toolID != "" {
-
-					if prevPrompt, ok := a.toolAgentPrompt[toolID]; ok {
-
-						prompt = injectError(msg, prevPrompt.(string))
-						// Get fresh history from history provider instead of context
-						if a.historyProvider != nil {
-							history = a.historyProvider.GetHistoryForAgent(a.name)
-						} else {
-							history = model.BuildChatHistory(msg.Context) // fallback
-						}
+			// --- 5. Handle tool calls ---
+			if len(llmResp.ToolCalls) > 0 {
+				utils.Logger.Debug().Int("tool_calls_count", len(llmResp.ToolCalls)).Msg("LLM response contains tool calls")
+				for _, tc := range llmResp.ToolCalls {
+					if tc.ID == "" {
+						tc.ID = uuid.New().String() // Or whatever you use for unique IDs
+					}
+					output <- model.AgentMessage{
+						Role:       model.RoleAssistant,
+						Type:       model.TypeToolCall,
+						ToolCall:   &common.ToolCall{Name: tc.Name, Args: tc.Args, Caller: a.name},
+						ToolCallID: tc.ID, // Use the LLM's tool call ID
+						Context:    msg.Context,
+						RouteTarget: "toolrunner", // TODO: Replace with dynamic route if your registry can handle it.
 					}
 				}
+				continue
+			}
+
+			utils.Logger.Debug().Msg("LLM response does not contain tool calls")
+
+			// --- 6. Unmarshal output as JSON AgentMessage ---
+			var replyMsg model.AgentMessage
+			fixed := FixContentFieldNewlines(llmResp.Content)
+			replyPtr, err := HandleLLMResponse(fixed)
+			if err != nil {
+				utils.Logger.Error().Err(err).Msgf("Failed to parse LLM response as AgentMessage \nContent: %s", llmResp.Content)
+			} else if replyPtr != nil {
+				replyMsg = *replyPtr
+			}
+
+			output <- model.AgentMessage{
+				Role:        model.RoleAssistant,
+				Type:        model.TypeChat,
+				Content:     replyMsg.Content,
+				RouteTarget: replyMsg.RouteTarget,
+				Context:     msg.Context,
+				Tokens:      nil,
+			}
+
+			// --- 7. OPTIONAL: Add "exit" logic ---
+			// e.g., if replyMsg.Type == model.TypeDone || some condition in replyMsg/llmResp, then break to avoid infinite loops.
+			// if replyMsg.Type == model.TypeDone {
+			//     utils.Logger.Info().Msg("Assistant agent finished the workflow. Exiting agent loop.")
+			//     return
+			// }
+		}
+	}()
+}
+
+// ExtractJSON parses JSON content enclosed by markers from the LLM response
+func ExtractJSON(response string) ([]byte, error) {
+    re := regexp.MustCompile(`---JSON START---\s*(\{.*?\})\s*---JSON END---`)
+    match := re.FindStringSubmatch(response)
+
+    if len(match) < 2 {
+        return nil, fmt.Errorf("no valid JSON section found")
+    }
+
+    return []byte(match[1]), nil
+}
+
+// Usage example
+func HandleLLMResponse(response string) (*model.AgentMessage, error) {
+	var result model.AgentMessage
+	if err := json.Unmarshal([]byte(response), &result); err != nil {
+		utils.Logger.Error().Err(err).Msgf("Failed to unmarshal JSON into AgentMessage: %s", response)
+	
+	} else {
+		return &result, nil
+	}
+
+		jsonBytes, err := ExtractJSON(response)
+		if err != nil {
+			// Log full response for debugging
+			utils.Logger.Error().Err(err).Msgf("Failed to extract JSON from LLM response: %s", string(jsonBytes))
+		} else {
+			// Try to unmarshal the extracted JSON
+			if err := json.Unmarshal(jsonBytes, &result); err == nil {
+				return &result, nil
+			}
+			utils.Logger.Error().Err(err).Msgf("Failed to unmarshal extracted JSON into AgentMessage: %s", string(jsonBytes))
+		}
+		return nil, err
+
+
+}
+
+// Helper: personaOrDefault
+func (a *AssistantAgent) personaOrDefault() string {
+	if a.persona != "" {
+		return a.persona
+	}
+	return "You are the Assistant Agent responsible for coding and bugfixing."
+}
+
+// Helper: filter out Orchestrator messages from history (to avoid polluting chat for LLMs)
+func filterOutOrchestratorMessages(history []model.AgentMessage) []model.AgentMessage {
+	var out []model.AgentMessage
+	for _, msg := range history {
+		if strings.ToLower(msg.Sender) != "orchestrator" && msg.Role != model.RoleOrchestrator {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
+func (a *AssistantAgent) Start2(input <-chan model.AgentMessage, output chan<- model.AgentMessage) {
+	go func() {
+		for msg := range input {
+			utils.Logger.Debug().
+				Str("agent", a.name).
+				Str("event", "received_message").
+				Msgf("Received message from : %s", msg.Sender)
+
+			metrics.AgentMessagesTotal.WithLabelValues(a.name).Inc()
+			utils.LogContext(msg.Context, "Assistant received context")
+	
+
+			// prompt := ""
+			// history := []model.AgentMessage{}
+
+			// if msg.ErrorDetail != nil && msg.ErrorDetail.Phase == "tool_call" {
+			// 	// If this is a tool call error, we need to handle it
+			// 	utils.Logger.Error().
+			// 		Str("agent", a.name).
+			// 		Msgf("Tool call error: %s", msg.ErrorDetail.ErrMsg)
+
+			// 	// get previous prompt and append the error details
+			// 	if toolID, ok := msg.Context["tool_id"].(string); ok && toolID != "" {
+
+			// 		if prevPrompt, ok := a.toolAgentPrompt[toolID]; ok {
+
+			// 			prompt = injectError(msg, prevPrompt.(string))
+			// 			// Get fresh history from history provider instead of context
+			// 			if a.historyProvider != nil {
+			// 				history = a.historyProvider.GetHistoryForAgent(a.name)
+			// 			} else {
+			// 				history = model.BuildChatHistory(msg.Context) // fallback
+			// 			}
+			// 		}
+			// 	}
+			// } else {
+
+			// 	// Get fresh history from history provider instead of context
+			// 	if a.historyProvider != nil {
+			// 		history = a.historyProvider.GetHistoryForAgent(a.name)
+			// 	} else {
+			// 		history = model.BuildChatHistory(msg.Context) // fallback
+			// 	}
+
+
+			// 	prompt = BuildUpPrompt(history, msg.Content, a)
+
+			// 	// tempPrompt := prompt
+
+			// 	// Build LLM prompt, injecting error details from previous tool execution if present.
+			// 	prompt = injectError(msg, prompt)
+
+			// 	// If the last tool call failed, inject previous assistant output for context
+			// 	if errText, ok := msg.Context["tool_error"].(string); ok && errText != "" {
+
+			// 		var uxSpec string
+			// 		if lastRelevant := FindLastRelevantContext(history, a.name); lastRelevant != nil {
+			// 			uxSpec = lastRelevant.Content
+			// 		}
+
+			// 		// Now build your prompt as before:
+			// 		if uxSpec != "" {
+			// 			prompt += "\n\n# Previous request context:\n" + uxSpec
+			// 		}
+			// 	}
+
+			// 	utils.Logger.Debug().
+			// 		Str("agent", a.name).
+			// 		Msgf("About to call llm with prompt \n %s", prompt[:min(500000, len(prompt))]) //Was 50!!!  Log first 100 chars
+			// }
+
+
+			history := buildFilteredHistory(msg)
+			utils.Logger.Debug().Msgf("Filtered history length: %d", len(history))
+
+			// --- KEEP prompt override logic, but clarify ---
+			var prompt string
+			if a.promptBuilder != nil {
+				// Use prompt builder function
+				prompt = a.promptBuilder(msg)
 			} else {
+				// Fallback to local prompt builder
+				prompt = a.buildUpPrompt(msg.Content)
+				// prompt = "You are an assistant. Respond to the user."
+			}
 
-				// Get fresh history from history provider instead of context
-				if a.historyProvider != nil {
-					history = a.historyProvider.GetHistoryForAgent(a.name)
-				} else {
-					history = model.BuildChatHistory(msg.Context) // fallback
-				}
-
-
-				prompt = BuildUpPrompt(history, msg.Content, a)
-
-				// tempPrompt := prompt
-
-				// Build LLM prompt, injecting error details from previous tool execution if present.
-				prompt = injectError(msg, prompt)
-
-				// If the last tool call failed, inject previous assistant output for context
-				if errText, ok := msg.Context["tool_error"].(string); ok && errText != "" {
-
-					var uxSpec string
-					if lastRelevant := FindLastRelevantContext(history, a.name); lastRelevant != nil {
-						uxSpec = lastRelevant.Content
-					}
-
-					// Now build your prompt as before:
-					if uxSpec != "" {
-						prompt += "\n\n# Previous request context:\n" + uxSpec
-					}
-				}
+				// --- ADD: If previous tool error, inject all error details into the prompt ---
+			// prompt = injectToolErrorDetails(msg, prompt)
 
 				utils.Logger.Debug().
-					Str("agent", a.name).
-					Msgf("About to call llm with prompt \n %s", prompt[:min(500000, len(prompt))]) //Was 50!!!  Log first 100 chars
-			}
+				Str("agent", a.name).
+				Msgf("About to call llm with prompt: %s", prompt[:min(50, len(prompt))])
+
 
 			filteredHistory := filterAgentHistory(history)
 			// Call LLM with structured history, not just a string!
-			llmResp, err := a.llmClient.Generate(filteredHistory, prompt)
+			llmResp, err := a.llmClient.Generate(filteredHistory, prompt, true)
+
 			if err != nil {
-				utils.Logger.Error().
-					Err(err).
-					Str("agent", a.name).
-					Msg("LLM generation error")
+				// utils.Logger.Error().
+				// 	Err(err).
+				// 	Str("agent", a.name).
+				// 	Msg("LLM generation error")
+
 				output <- model.AgentMessage{
 					Role:    a.role,
 					Type:    model.TypeError,
@@ -242,19 +435,22 @@ func (a *AssistantAgent) Start(input <-chan model.AgentMessage, output chan<- mo
 				}
 				continue
 			}
+
 			utils.Logger.Debug().Msg("LLM response does not contain tool calls")
 			var replyMsg model.AgentMessage
+
 			fixed := FixContentFieldNewlines(llmResp.Content)
 			utils.Logger.Debug().
 				Str("agent", a.name).Msg("About to parse LLM response content as AgentMessage")
 			if err := json.Unmarshal([]byte(fixed), &replyMsg); err != nil {
 				// handle error
 				utils.Logger.Error().Err(err).Msgf("Failed to parse LLM response as AgentMessage \nContent: %s", llmResp.Content)
+				replyMsg = model.AgentMessage{
+					Role:    model.RoleAssistant,
+					Type:    model.TypeChat,
+					Content: llmResp.Content,
+				}
 			}
-
-			utils.Logger.Debug().
-				Str("agent", a.name).
-				Msg(replyMsg.Content)
 
 			utils.Logger.Debug().
 				Str("agent", a.name).
@@ -271,8 +467,33 @@ func (a *AssistantAgent) Start(input <-chan model.AgentMessage, output chan<- mo
 				Context:     msg.Context,
 				Tokens:      nil,
 			}
+
+				// --- ADD: Optional exit logic, e.g., if replyMsg signals done ---
+			if replyMsg.Type == model.TypeDone || strings.Contains(strings.ToLower(replyMsg.Content), "exit") {
+				utils.Logger.Info().Msg("Exit criteria met, terminating assistant agent loop.")
+				close(output)
+				return
+			}
 		}
 	}()
+}
+
+// --- ADD: Helper to filter out Orchestrator messages from history ---
+func buildFilteredHistory(msg model.AgentMessage) []model.AgentMessage {
+	var history []model.AgentMessage
+	if ctxHist, ok := msg.Context["history"].([]model.AgentMessage); ok {
+		for _, h := range ctxHist {
+			if strings.ToLower(h.Sender) == "orchestrator" || strings.ToLower(h.Role) == "orchestrator" {
+				continue // skip orchestrator
+			}
+			history = append(history, h)
+		}
+	}
+	// Always include current message at the end if it's not orchestrator
+	if strings.ToLower(msg.Sender) != "orchestrator" && strings.ToLower(msg.Role) != "orchestrator" {
+		history = append(history, msg)
+	}
+	return history
 }
 
 // Only add relevant roles to LLM history
@@ -288,8 +509,14 @@ func filterAgentHistory(history []model.AgentMessage) []model.AgentMessage {
 			// Only deduplicate tool calls, let all other messages pass through
 			if m.ToolCall != nil {
 				if m.ToolCall.ID == "" {
-					utils.Logger.Error().Msg("Tool call message found in history with empty ID! This is a bug in the code that generates tool calls.")
-					panic("tool_call message found in history with empty ID! You must fix the code that generates tool calls.")
+					// check on m.ToolCallID and set this to m.ToolCall.ID
+					if m.ToolCallID != "" {
+						m.ToolCall.ID = m.ToolCallID // Use the ID from the message if present
+					} else {
+						// This is a bug in the code that generates tool calls
+						utils.Logger.Error().Msg("Tool call message found in history with empty ID! This is a bug in the code that generates tool calls.")
+						panic("tool_call message found in history with empty ID! You must fix the code that generates tool calls.")
+					}
 				}
 				if seenToolCallIDs[fmt.Sprintf("%s:%s", m.Role, m.ToolCall.ID)] {
 					continue // skip duplicate
@@ -304,7 +531,7 @@ func filterAgentHistory(history []model.AgentMessage) []model.AgentMessage {
 	return out
 }
 
-func BuildUpPrompt(history []model.AgentMessage, userRequest string, a *AssistantAgent) string {
+func  (a *AssistantAgent) buildUpPrompt(userRequest string) string {
 
 	persona := a.persona
 	promptOverload := a.promptOverload
@@ -498,6 +725,26 @@ func injectError(msg model.AgentMessage, prompt string) string {
 			Msg("Injecting previous tool error details into prompt")
 		// prompt = fmt.Sprintf("The previous code/tool execution failed. Here are the details:\n%s\n", errBuf.String())
 		prompt += errBuf.String()
+	}
+	return prompt
+}
+// --- ADD: Inject ALL tool error details when present into prompt ---
+func injectToolErrorDetails(msg model.AgentMessage, prompt string) string {
+	ctx := msg.Context
+	if ctx == nil {
+		return prompt
+	}
+	if errVal, ok := ctx["tool_error"]; ok {
+		prompt += "\n\nPREVIOUS TOOL ERROR:\n\n" + fmt.Sprintf("%v", errVal)
+	}
+	if errDetail, ok := ctx["tool_error_detail"]; ok {
+		prompt += "\n\nError Detail: " + fmt.Sprintf("%v", errDetail)
+	}
+	if errPhase, ok := ctx["tool_phase"]; ok {
+		prompt += "\n\nError Phase: " + fmt.Sprintf("%v", errPhase)
+	}
+	if errName, ok := ctx["tool_name"]; ok {
+		prompt += "\n\nTool Name: " + fmt.Sprintf("%v", errName)
 	}
 	return prompt
 }

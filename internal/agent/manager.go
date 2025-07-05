@@ -72,7 +72,53 @@ func (m *ChatManager) AgentOutputChan(agentName string) chan model.AgentMessage 
 	return m.agentOutputs[agentName]
 }
 
+// The main message loop (MAJOR CHANGES HERE)
 func (m *ChatManager) Start() {
+	go func() {
+		for msg := range m.input {
+			metrics.AgentMessagesTotal.WithLabelValues(m.Name()).Inc()
+			utils.Logger.Debug().Str("sender", msg.OriginAgent).Msgf("Manager received message: %s", msg.Content)
+			m.appendHistory(msg)
+
+			var targetAgent string
+
+			// ROUTE: Always send first user message to orchestrator!
+			if msg.RouteTarget != "" && msg.RouteTarget != m.Name() {
+				targetAgent = msg.RouteTarget
+			} else if msg.Role == "user" {
+				targetAgent = "Orchestrator"
+			} else {
+				targetAgent = "Orchestrator"
+			}
+
+			utils.Logger.Debug().Str("target", targetAgent).Msgf("---> Routing to %s", targetAgent)
+			m.SendToAgent(targetAgent, msg)
+			resp := <-m.AgentOutputChan(targetAgent)
+
+			preview := resp.Content
+			if len(preview) > 50 {
+				preview = preview[:50]
+			}
+			utils.Logger.Debug().Str("sender", resp.OriginAgent).Msgf("Manager received output response from %s: %s", targetAgent, preview)
+			m.appendHistory(resp)
+
+			// *** Handle reply chaining ***
+			if resp.RouteTarget != "" && resp.RouteTarget != m.Name() {
+				utils.Logger.Debug().Str("next_agent", resp.RouteTarget).Msgf("Forwarding response to next agent: %s", resp.RouteTarget)
+				if resp.Context == nil {
+					resp.Context = map[string]interface{}{}
+				}
+				resp.Context["history"] = m.history // inject up-to-date history
+				m.input <- resp // enqueue next step
+			} else {
+				utils.Logger.Debug().Msg("No next agent specified, finalizing response")
+				m.output <- resp // finally output if no next step
+			}
+		}
+	}()
+}
+
+func (m *ChatManager) Start2() {
 	go func() {
 		for msg := range m.input {
 			metrics.AgentMessagesTotal.WithLabelValues(m.Name()).Inc()
@@ -122,6 +168,18 @@ func (m *ChatManager) Start() {
 		}
 	}()
 }
+
+// Filter orchestrator messages from history (ADD THIS)
+func filterHistoryNoOrchestrator(hist []model.AgentMessage) []model.AgentMessage {
+	filtered := []model.AgentMessage{}
+	for _, msg := range hist {
+		if msg.Role != "orchestrator" {
+			filtered = append(filtered, msg)
+		}
+	}
+	return filtered
+}
+
 func (m *ChatManager) appendHistory(msg model.AgentMessage) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

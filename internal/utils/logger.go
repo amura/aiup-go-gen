@@ -70,13 +70,15 @@ func goColorableStdout() *os.File {
 }
 
 
-func LogContext(ctx map[string]interface{}, msg string) {
+func LogContext(ctx map[string]any, msg string) {
     if ctx == nil {
         Logger.Debug().Msgf("[Context: %s] <nil>", msg)
         return
     }
     keys := []string{}
-    for k := range ctx { keys = append(keys, k) }
-    Logger.Debug().Msgf("[Context: %s] keys=%v, values=%v", msg, keys, ctx)
+    for k := range ctx { 
+        keys = append(keys, k) 
+    }
+    Logger.Debug().Msgf("[Context: %s] keys=%v (count: %d)", msg, keys, len(ctx))
 }
 

@@ -133,7 +133,7 @@ mcp_tools:
             description: The language or environment (e.g., python, bash, dotnet, angular)
           code_blocks:
             type: array
-            description: List of code files to execute, each with language, filename, and code.
+            description: List of code files to execute, each with language, filename, and code, including init and launch scripts.
             items:
                 type: object
                 properties:
@@ -152,10 +152,10 @@ mcp_tools:
                   - code
           init:
             type: string
-            description: Optional initialization script or command.
+            description: Optional initialization command or script to execute which is included in code_blocks.
           launch:
             type: string
-            description: Optional launch command e.g. ng serve, dotnet run or shell script to execute such as launch.sh (ensure chmod +x).
+            description: Optional launch command e.g. ng serve, dotnet run or shell script to execute such as launch.sh (ensure chmod +x) which should be included in code_blocks.
           timeout:
             type: number
             description: The max timeout in seconds for which either launch or init commands should be executed before termination. Avoids waiting for ever.
