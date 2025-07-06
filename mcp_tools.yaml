@@ -57,6 +57,11 @@ mcp_tools:
             # filename: init.sh
             apt-get update && apt-get install -y nodejs
             ```
+          - |
+            ```bash
+            # filename: launch.sh
+            ng serve --host
+            ```
         init: "init.sh"
         launch: "test.sh"
         timeout: "90"
@@ -77,7 +82,7 @@ mcp_tools:
                     description: File language (e.g., python, bash, sh, typescript)
                   filename:
                     type: string
-                    description: Name and full path of the code file (e.g., main.py, app\start.sh)
+                    description: Name and full relative path to the code file (e.g., main.py, app\start.sh, app\user-login\user-login.component.ts ....)
                   code:
                     type: string
                     description: The full code/content of the file.
@@ -86,11 +91,11 @@ mcp_tools:
                   - filename
                   - code
           init:
-            type: string
-            description: Optional initialization script or command.
+            type: ["string", "null"]
+            description: Optional initialization command or script to execute which is included in code_blocks.
           launch:
-            type: string
-            description: Optional launch command e.g. ng serve, dotnet run or shell script to execute such as launch.sh (ensure chmod +x).
+            type: ["string", "null"]
+            description: Optional launch command e.g. ng serve, dotnet run or shell script to execute such as launch.sh (ensure chmod +x) which should be included in code_blocks. 
           timeout:
             type: number
             description: The max timeout in seconds for which either launch or init commands should be executed before termination. Avoids waiting for ever.
@@ -105,6 +110,8 @@ mcp_tools:
         required:
           - language
           - code_blocks
+          - init
+          - launch
 - name: dagger_exec
   operations:
     - name: dagger_exec
@@ -151,11 +158,11 @@ mcp_tools:
                   - filename
                   - code
           init:
-            type: string
+            type: ["string", "null"]
             description: Optional initialization command or script to execute which is included in code_blocks.
           launch:
-            type: string
-            description: Optional launch command e.g. ng serve, dotnet run or shell script to execute such as launch.sh (ensure chmod +x) which should be included in code_blocks.
+            type: ["string", "null"]
+            description: Optional launch command e.g. ng serve, dotnet run or shell script to execute such as launch.sh (ensure chmod +x) which should be included in code_blocks. 
           timeout:
             type: number
             description: The max timeout in seconds for which either launch or init commands should be executed before termination. Avoids waiting for ever.
@@ -165,6 +172,8 @@ mcp_tools:
         required:
           - language
           - code_blocks
+          - init
+          - launch
 # - name: search_mcp
 #   endpoint: http://localhost:8081  # The port you mapped the MCP search server to
 #   description: >

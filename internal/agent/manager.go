@@ -91,6 +91,11 @@ func (m *ChatManager) Start() {
 				targetAgent = "Orchestrator"
 			}
 
+			// if toolrunner, append to history
+			if targetAgent == "toolrunner" {
+				m.appendHistory(msg)
+			}
+
 			utils.Logger.Debug().Str("target", targetAgent).Msgf("---> Routing to %s", targetAgent)
 			m.SendToAgent(targetAgent, msg)
 			resp := <-m.AgentOutputChan(targetAgent)
