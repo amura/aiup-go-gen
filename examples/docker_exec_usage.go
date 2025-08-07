@@ -36,6 +36,8 @@ func createAngularDockerTool() *tools.DockerExecTool {
 	return tools.NewDockerExecToolWithEvaluator(
 		"angular-test",          // prefix
 		"angular-dev:latest",    // image
+		"example-container-123", // containerID
+		"/tmp",                  // tempPath
 		angularTimeoutEvaluator, // error evaluator function
 	)
 }
@@ -43,8 +45,10 @@ func createAngularDockerTool() *tools.DockerExecTool {
 // Example of creating DockerExecTool without error evaluator (default behavior)
 func createDefaultDockerTool() *tools.DockerExecTool {
 	return tools.NewDockerExecTool(
-		"default-test", // prefix
-		"node:20",      // image
+		"default-test",          // prefix
+		"node:20",               // image
+		"example-container-456", // containerID
+		"/tmp",                  // tempPath
 	)
 }
 

@@ -191,9 +191,14 @@ func (c *OpenAILLMClient) Generate(history []model.AgentMessage, prompt string, 
 		Temperature: 0, // Make output deterministic!
 	}
 
+
 	if enableTools && len(c.tools) > 0 {
 		req.Tools = c.tools
-		req.ToolChoice = "auto"
+		if len(prompt) >= 54 && prompt[:54] == "Resolve any issues with the tool execution and continue to fulfil" {
+			req.ToolChoice = "required"
+		} else {
+			req.ToolChoice = "auto"
+		}
 	}
 
 	resp, err := c.client.CreateChatCompletion(context.Background(), req)

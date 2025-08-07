@@ -14,7 +14,6 @@ import (
 	"aiupstart.com/go-gen/internal/common"
 	"aiupstart.com/go-gen/internal/metrics"
 	"aiupstart.com/go-gen/internal/utils"
-	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -30,6 +29,8 @@ type DockerExecTool struct {
 	workspace      string
 	errorEvaluator ErrorEvaluatorFunc // Function to evaluate if errors should be considered pass/fail
 	mu             sync.Mutex         // for concurrency safety
+	tempPath       string             // Optional temp path for workspace, if needed
+
 }
 
 type CodeBlock struct {
@@ -40,17 +41,19 @@ type CodeBlock struct {
 
 const DefaultDockerImage = "node:20"
 
-func NewDockerExecTool(prefix string, image string) *DockerExecTool {
-	return NewDockerExecToolWithEvaluator(prefix, image, nil)
+func NewDockerExecTool(prefix string, image string, containerID string, tempPath string) *DockerExecTool {
+	return NewDockerExecToolWithEvaluator(prefix, image, containerID, tempPath, nil)
 }
 
-func NewDockerExecToolWithEvaluator(prefix string, image string, errorEvaluator ErrorEvaluatorFunc) *DockerExecTool {
+func NewDockerExecToolWithEvaluator(prefix string, image string, containerID string, tempPath string, errorEvaluator ErrorEvaluatorFunc) *DockerExecTool {
 	if image == "" {
 		image = DefaultDockerImage
 	}
 	return &DockerExecTool{
 		image:          image,
 		prefix:         prefix,
+		containerID:    containerID,
+		tempPath:       tempPath,
 		errorEvaluator: errorEvaluator,
 	}
 }
@@ -96,13 +99,13 @@ func (t *DockerExecTool) ensureContainer(ctx context.Context, lang string, ports
 		// Optionally check "docker inspect" if you want to verify running
 		return nil
 	}
-	id := uuid.NewString()
+
 	img := t.image
 	if limg, ok := langImageMap[lang]; ok {
 		img = limg
 	}
-	containerName := fmt.Sprintf("%s-%s", t.prefix, id)
-	workspace := filepath.Join(os.TempDir(), "dockerexec-"+id)
+	containerName := fmt.Sprintf("%s-%s", t.prefix, t.containerID)
+	workspace := filepath.Join(t.tempPath, "dockerexec-"+t.containerID)
 	os.MkdirAll(workspace, 0o755)
 	utils.Logger.Debug().Str("containerName", containerName).Str("image", img).Msg("About to start the container for the session")
 	// Build docker run command with port mappings

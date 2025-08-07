@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"sync"
 
 	"aiupstart.com/go-gen/internal/metrics"
@@ -11,22 +12,26 @@ import (
 // ChatManager implements HistoryProvider interface
 var _ HistoryProvider = (*ChatManager)(nil)
 
+type MessageRouterFunc func(msg model.AgentMessage) (string, error)
+
 type ChatManager struct {
 	name         string
 	agents       map[string]Agent
 	agentInputs  map[string]chan model.AgentMessage
 	agentOutputs map[string]chan model.AgentMessage
 	history      []model.AgentMessage
+	routerFn    MessageRouterFunc
 	mu           sync.Mutex
 	input        chan model.AgentMessage
 	output       chan model.AgentMessage
 }
 
-func NewChatManager(agents []Agent) *ChatManager {
+func NewChatManager(agents []Agent, routerFunc MessageRouterFunc) *ChatManager {
 	cm := &ChatManager{
 		agents:       make(map[string]Agent),
 		agentInputs:  make(map[string]chan model.AgentMessage),
 		agentOutputs: make(map[string]chan model.AgentMessage),
+		routerFn:   routerFunc,
 		history:      []model.AgentMessage{},
 		input:        make(chan model.AgentMessage, 8),
 		output:       make(chan model.AgentMessage, 8),
@@ -45,17 +50,18 @@ func (m *ChatManager) Description() string     { return "ChatManager for agent c
 func (m *ChatManager) SetDescription(d string) {}
 
 func (m *ChatManager) RegisterAgent(agent Agent) {
-	m.agents[agent.Name()] = agent
+	agentName := strings.ToLower(agent.Name())
+	m.agents[agentName] = agent
 	inCh := make(chan model.AgentMessage, 16)
 	outCh := make(chan model.AgentMessage, 16)
-	m.agentInputs[agent.Name()] = inCh
-	m.agentOutputs[agent.Name()] = outCh
+	m.agentInputs[agentName] = inCh
+	m.agentOutputs[agentName] = outCh
 	agent.Start(inCh, outCh)
-	utils.Logger.Debug().Str("agent", agent.Name()).Msg("Registered agent with manager")
+	utils.Logger.Debug().Str("agent", agentName).Msg("Registered agent with manager")
 }
 
 func (m *ChatManager) SendToAgent(agentName string, msg model.AgentMessage) {
-	inCh, ok := m.agentInputs[agentName]
+	inCh, ok := m.agentInputs[strings.ToLower(agentName)]
 	if ok {
 		inCh <- msg
 	} else {
@@ -66,9 +72,11 @@ func (m *ChatManager) SendToAgent(agentName string, msg model.AgentMessage) {
 func (m *ChatManager) InputChan() chan model.AgentMessage  { return m.input }
 func (m *ChatManager) OutputChan() chan model.AgentMessage { return m.output }
 func (m *ChatManager) AgentInputChan(agentName string) chan model.AgentMessage {
+	agentName = strings.ToLower(agentName)
 	return m.agentInputs[agentName]
 }
 func (m *ChatManager) AgentOutputChan(agentName string) chan model.AgentMessage {
+	agentName = strings.ToLower(agentName)
 	return m.agentOutputs[agentName]
 }
 
@@ -80,16 +88,33 @@ func (m *ChatManager) Start() {
 			utils.Logger.Debug().Str("sender", msg.OriginAgent).Msgf("Manager received message: %s", msg.Content)
 			m.appendHistory(msg)
 
-			var targetAgent string
+			var targetAgent string = "Orchestrator"
+
+			targetAgent2, err := m.routerFn(msg)
+					if err != nil {
+						utils.Logger.Error().Err(err).Str("sender", msg.OriginAgent).Msg("Routing error")
+						
+					} else {
+						targetAgent = targetAgent2
+					}
+			
 
 			// ROUTE: Always send first user message to orchestrator!
-			if msg.RouteTarget != "" && msg.RouteTarget != m.Name() {
-				targetAgent = msg.RouteTarget
-			} else if msg.Role == "user" {
-				targetAgent = "Orchestrator"
-			} else {
-				targetAgent = "Orchestrator"
-			}
+			// if msg.RouteTarget != "" && msg.RouteTarget != m.Name() {
+			// 	targetAgent = msg.RouteTarget
+			// 	// can override with custom routing function
+			// 	if m.routerFn != nil {
+			// 		targetAgent2, err := m.routerFn(msg)
+			// 		if err != nil {
+			// 			utils.Logger.Error().Err(err).Str("sender", msg.OriginAgent).Msg("Routing error")
+						
+			// 		} else {
+			// 			targetAgent = targetAgent2
+			// 		}
+			// 	} 
+			// } else if msg.Role == "user" {
+			// 	targetAgent = "Orchestrator"
+			// }
 
 			// if toolrunner, append to history
 			if targetAgent == "toolrunner" {

@@ -33,3 +33,5 @@ go.work.sum
 Thumbs.db
 **/.env
 **__debug_bin*
+
+**/temp/

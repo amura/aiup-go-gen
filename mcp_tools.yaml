@@ -44,7 +44,7 @@ mcp_tools:
 - name: docker_exec
   operations:
     - name: docker_exec
-      description: Execute and validate code blocks by executing them in a docker container. Ensure to include initialization and launch scripts to install dependencies needed and then launch the solution.
+      description: Writes out all the code files provided in code_blocks to disk following hierarchical file paths. Overwrites any existing matching files.  Executes the code  in a docker container by running bash scripta provided in the 'init' argument for setting up e.g. creation of project, and  'launch' argument for serving up application e.g ng serve.
       example_args:
         code_blocks:
           - |
@@ -73,7 +73,7 @@ mcp_tools:
             description: The language or environment (e.g., python, bash, dotnet, angular)
           code_blocks:
             type: array
-            description: List of code files to execute, each with language, filename, and code.
+            description: List of code files to execute, each with language, filename, and full code.
             items:
                 type: object
                 properties:
@@ -82,7 +82,7 @@ mcp_tools:
                     description: File language (e.g., python, bash, sh, typescript)
                   filename:
                     type: string
-                    description: Name and full relative path to the code file (e.g., main.py, app\start.sh, app\user-login\user-login.component.ts ....)
+                    description: Name and full relative path to the code file (e.g., main.py, app\start.sh, app\user-login\user-login.component.ts ....). Existing files will be overwritten.
                   code:
                     type: string
                     description: The full code/content of the file.
@@ -92,10 +92,10 @@ mcp_tools:
                   - code
           init:
             type: ["string", "null"]
-            description: Optional initialization command or script to execute which is included in code_blocks.
+            description: Initialization command or script to execute which is included in code_blocks.
           launch:
             type: ["string", "null"]
-            description: Optional launch command e.g. ng serve, dotnet run or shell script to execute such as launch.sh (ensure chmod +x) which should be included in code_blocks. 
+            description: Launch command e.g. ng serve, dotnet run or shell script to execute such as launch.sh (ensure chmod +x) which should be included in code_blocks. 
           timeout:
             type: number
             description: The max timeout in seconds for which either launch or init commands should be executed before termination. Avoids waiting for ever.
@@ -174,6 +174,46 @@ mcp_tools:
           - code_blocks
           - init
           - launch
+
+- name: file_tree
+  operations:
+    - name: list_files
+      description: List files and directories in a tree structure using the tree command. Useful for exploring project structure and file organization.
+      example_args:
+        path: "/app"
+        max_depth: 3
+        show_hidden: false
+        directories_only: false
+      parameters:
+        type: object
+        properties:
+          path:
+            type: string
+            description: The directory path to list (default is current directory)
+            default: "."
+          max_depth:
+            type: integer
+            description: Maximum depth to traverse (default is unlimited)
+          show_hidden:
+            type: boolean
+            description: Whether to show hidden files and directories (default is false)
+            default: false
+          directories_only:
+            type: boolean
+            description: Whether to show only directories (default is false)
+            default: false
+          pattern:
+            type: string
+            description: File pattern to match (e.g., "*.go", "*.js")
+          exclude_pattern:
+            type: string
+            description: Pattern to exclude from results (e.g., "node_modules")
+          file_size:
+            type: boolean
+            description: Whether to show file sizes (default is false)
+            default: false
+        required: []
+
 # - name: search_mcp
 #   endpoint: http://localhost:8081  # The port you mapped the MCP search server to
 #   description: >

@@ -18,7 +18,8 @@ You are an orchestration agent for an AI multi-agent system.
 ** You do not have any use of tools or code execution, and only route messages between agents. **
 
 Rules:
-1. When a request involves ui design, you must always delegate the first request to a UX agent for wireframe before passing to coder for implementation.
+1. When a request involves ui design, you must always delegate the first request to a UX agent for wireframe before passing to a scaffolder for setting up the initial code, then 
+forward onwards to a  coder for implementation of user request.
 
 All communication and handoff must use strict JSON in the format:
 { "role": "...", "type": "...", "content": "...", ... }
@@ -42,7 +43,8 @@ Full context history:
 // ----------- CHANGES: Workflow map is primary decision mechanism -------------
 var DefaultWorkflow = map[string]string{
 	"user":      "ux",        // User messages go to UX agent
-	"ux":        "assistant", // UX agent output to Assistant
+	"ux":        "scaffolding", // UX agent output goes to Assistant
+	"scaffolding":        "assistant", // UX agent output to Assistant
 	"assistant": "tool",      // Assistant output to ToolRunner (if tool_call)
 	"tool":      "assistant", // On error or finish, back to Assistant
 }

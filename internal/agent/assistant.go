@@ -173,23 +173,12 @@ func (a *AssistantAgent) Start(input <-chan model.AgentMessage, output chan<- mo
 
 			// --- 1. Prepare prompt ---
 		    prompt = a.buildUpPrompt(msg.Content) // Use the local buildUpPrompt method
-			// if a.promptOverload != "" {
-			// 	prompt = a.promptOverload
-			// 	utils.Logger.Debug().Msg("Using prompt override for AssistantAgent")
-			// } else {
-			// 	// Use default template, inject persona/tools, user request
-			// 	// prompt = fmt.Sprintf(
-			// 	// 	strings.ReplaceAll(assistantPromptTemplate, "T_B_T", "```"),
-			// 	// 	a.personaOrDefault(),
-			// 	// 	defaultPrompt,
-			// 	// 	a.toolRegistry.DescribeTools(),
-			// 	// 	msg.Content,
-			// 	// )
-			// 	prompt = a.buildUpPrompt(msg.Content) // Use the local buildUpPrompt method
-			// }
+			
 
 			// --- 2. Inject tool error details into the prompt if present ---
 			prompt = injectError(msg, prompt) // (helper function provided elsewhere; should append error detail if present)
+
+			} else {
 
 			}
 
@@ -202,6 +191,7 @@ func (a *AssistantAgent) Start(input <-chan model.AgentMessage, output chan<- mo
 			if err != nil {
 				utils.Logger.Error().Err(err).Msgf("LLM generation error")
 				output <- model.AgentMessage{
+					Sender: a.name,
 					Role:    model.RoleAssistant,
 					Type:    model.TypeError,
 					Content: "[LLM ERROR] " + err.Error(),
@@ -219,6 +209,7 @@ func (a *AssistantAgent) Start(input <-chan model.AgentMessage, output chan<- mo
 						tc.ID = uuid.New().String() // Or whatever you use for unique IDs
 					}
 					output <- model.AgentMessage{
+						Sender: a.name,
 						Role:       model.RoleAssistant,
 						Type:       model.TypeToolCall,
 						ToolCall:   &common.ToolCall{Name: tc.Name, Args: tc.Args, Caller: a.name},
@@ -238,11 +229,49 @@ func (a *AssistantAgent) Start(input <-chan model.AgentMessage, output chan<- mo
 			replyPtr, err := HandleLLMResponse(fixed)
 			if err != nil {
 				utils.Logger.Error().Err(err).Msgf("Failed to parse LLM response as AgentMessage \nContent: %s", llmResp.Content)
+
+				// make another llm call to resolve the file content presented as a string block into tool calls
+				llmResp2, err := a.llmClient.Generate(filteredHistory,  fmt.Sprintf(`You are a helpful assistant the understands coding, and with the ability to generate tool calls given code blocks. 
+				            If the following content includes instructions or notes to the user about how the angular application has now been completed successfully, but it still include instructions about next steps to take to create the user request, 
+							you must take that action to fulfil the request fully. 
+							You have access to the  docker_exec tools. You must now analyze the following output from the coding assistant and reivew the original requests from the user to ensure the request has been fulfilled,
+							otherwise you should continue to generate full tool call for this. \n Content:  %s`, fixed), true)
+
+
+
+				if err != nil && len(llmResp2.ToolCalls) > 0 {
+				utils.Logger.Debug().Int("tool_calls_count", len(llmResp.ToolCalls)).Msg("LLM response contains tool calls")
+				for _, tc := range llmResp.ToolCalls {
+					if tc.ID == "" {
+						tc.ID = uuid.New().String() // Or whatever you use for unique IDs
+					}
+					output <- model.AgentMessage{
+						Role:       model.RoleAssistant,
+						Type:       model.TypeToolCall,
+						ToolCall:   &common.ToolCall{Name: tc.Name, Args: tc.Args, Caller: a.name},
+						ToolCallID: tc.ID, // Use the LLM's tool call ID
+						Context:    msg.Context,
+						RouteTarget: "toolrunner", // TODO: Replace with dynamic route if your registry can handle it.
+					}
+				}
+				continue
+			}
+
+				// Wrap assistant response if it contains raw code but no tool call
+				// if rewritten := maybeRewriteAsToolCall(fixed); rewritten != nil {
+				// 	rewritten.Context = msg.Context
+				// 	output <- *rewritten
+				// 	continue
+				// }
+
 			} else if replyPtr != nil {
 				replyMsg = *replyPtr
 			}
 
+
+
 			output <- model.AgentMessage{
+				Sender: a.name,
 				Role:        model.RoleAssistant,
 				Type:        model.TypeChat,
 				Content:     replyMsg.Content,
@@ -271,6 +300,52 @@ func ExtractJSON(response string) ([]byte, error) {
     }
 
     return []byte(match[1]), nil
+}
+
+
+func maybeRewriteAsToolCall(fixed string) *model.AgentMessage {
+	if len(fixed) == 0  {
+		return nil
+	}
+
+	blocks := extractCodeBlocks(fixed)
+	if len(blocks) == 0 {
+		return nil
+	}
+
+	return &model.AgentMessage{
+		Role: model.RoleAssistant,
+		Type: model.TypeToolCall,
+		ToolCall: &common.ToolCall{
+			Name:   "toolrunner",
+			Caller: "code-sanitizer",
+			Args: map[string]interface{}{
+				"code_blocks": blocks,
+			},
+		},
+		ToolCallID:  "sanitized-code-block",
+		RouteTarget: "toolrunner",
+		// Context:     msg.Context,
+	}
+}
+
+func extractCodeBlocks(content string) []map[string]string {
+	re := regexp.MustCompile("(?s)```(\\w+)?\\n(.*?)```")
+	matches := re.FindAllStringSubmatch(content, -1)
+
+	var blocks []map[string]string
+	for _, m := range matches {
+		lang := strings.TrimSpace(m[1])
+		code := strings.TrimSpace(m[2])
+		if code != "" {
+			blocks = append(blocks, map[string]string{
+				"language": lang,
+				"filename": "unknown.txt",
+				"code":     code,
+			})
+		}
+	}
+	return blocks
 }
 
 // Usage example
